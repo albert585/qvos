@@ -1,0 +1,89 @@
+#ifndef QVOS_FAT32_H
+#define QVOS_FAT32_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#define FAT32_ATTR_READ_ONLY 0x01
+#define FAT32_ATTR_DIRECTORY 0x10
+#define FAT32_ATTR_LFN       0x0f
+
+struct fat32_bpb {
+    uint8_t  jump[3];
+    uint8_t  oem[8];
+    uint16_t bytes_per_sector;
+    uint8_t  sectors_per_cluster;
+    uint16_t reserved_sectors;
+    uint8_t  num_fats;
+    uint16_t root_entries;
+    uint16_t total_sectors16;
+    uint8_t  media;
+    uint16_t sectors_per_fat16;
+    uint16_t sectors_per_track;
+    uint16_t num_heads;
+    uint32_t hidden_sectors;
+    uint32_t total_sectors32;
+    uint32_t sectors_per_fat32;
+    uint16_t ext_flags;
+    uint16_t fs_version;
+    uint32_t root_cluster;
+    uint16_t fs_info;
+    uint16_t backup_boot_sector;
+    uint8_t  reserved[12];
+    uint8_t  drive_number;
+    uint8_t  reserved1;
+    uint8_t  boot_signature;
+    uint32_t volume_id;
+    uint8_t  volume_label[11];
+    uint8_t  fs_type[8];
+} __attribute__((packed));
+
+struct fat32_dirent {
+    uint8_t  name[11];
+    uint8_t  attr;
+    uint8_t  ntres;
+    uint8_t  crt_time_tenth;
+    uint16_t crt_time;
+    uint16_t crt_date;
+    uint16_t lst_acc_date;
+    uint16_t cluster_hi;
+    uint16_t wrt_time;
+    uint16_t wrt_date;
+    uint16_t cluster_lo;
+    uint32_t size;
+} __attribute__((packed));
+
+struct fat32_file {
+    uint32_t start_cluster;
+    uint32_t size;
+};
+
+struct fat32_dir_iter {
+    uint32_t cluster;
+    uint32_t sector;
+    uint32_t index;       /* entry index within sector */
+};
+
+struct fat32_fs {
+    uint16_t bytes_per_sector;
+    uint8_t  sectors_per_cluster;
+    uint32_t cluster_bytes;
+    uint32_t reserved_sectors;
+    uint32_t num_fats;
+    uint32_t sectors_per_fat;
+    uint32_t fat_start;      /* first FAT sector */
+    uint32_t data_start;     /* first data sector */
+    uint32_t root_cluster;
+    uint32_t total_sectors;
+};
+
+extern struct fat32_fs fat_fs;
+
+int  fat32_init(void);
+int  fat32_open(const char *path, struct fat32_file *f);
+int  fat32_read(struct fat32_file *f, void *dst, uint32_t offset, size_t n);
+int  fat32_dir_next(struct fat32_dir_iter *it, struct fat32_dirent *de);
+int  fat32_dir_lookup(uint32_t dir_cluster, const char *name,
+                      struct fat32_file *out);
+
+#endif
