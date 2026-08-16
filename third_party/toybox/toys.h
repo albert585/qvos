@@ -6,9 +6,6 @@
 // Stuff that needs to go before the standard headers
 
 #include "generated/config.h"
-#ifdef QVOS_TOYBOX
-#include "qvos_shim.h"
-#else
 #include "lib/portability.h"
 
 // General posix-2008 headers
@@ -70,8 +67,6 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <sys/ttydefaults.h>
-
-#endif
 
 #include "lib/lib.h"
 #include "lib/lsm.h"

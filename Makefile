@@ -76,12 +76,49 @@ build/kernel/ramdisk.o: kernel/ramdisk.S build/disk.fat32
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# ---- picolibc (cross-compiled once; userspace programs link it for a
+# full C library instead of the hand-rolled user/libc.c subset) ----
+PICODIR := third_party/picolibc
+PICOCFLAGS = $(USERCFLAGS) -I$(PICODIR)/libc/include -Ibuild/picolibc
+
+build/picolibc/libc.a: scripts/cross-qvos.txt
+	@mkdir -p $(dir $@)
+	@if [ ! -d build/picolibc/meson-private ]; then \
+	  meson setup build/picolibc $(PICODIR) --cross-file scripts/cross-qvos.txt \
+	    -Dpicocrt=false -Dsemihost=false -Dfake-semihost=false -Dmultilib=false \
+	    -Dio-long-long=true -Dthread-local-storage=false -Dnewlib-global-errno=true \
+	    -Dsingle-thread=true -Dstdio-exit-flush=true -Dbuildtype=release; \
+	else \
+	  meson setup --reconfigure build/picolibc $(PICODIR) --cross-file scripts/cross-qvos.txt \
+	    -Dpicocrt=false -Dsemihost=false -Dfake-semihost=false -Dmultilib=false \
+	    -Dio-long-long=true -Dthread-local-storage=false -Dnewlib-global-errno=true \
+	    -Dsingle-thread=true -Dstdio-exit-flush=true -Dbuildtype=release; \
+	fi
+	ninja -C build/picolibc
+
+build/user/picostubs.o: user/picostubs.c build/picolibc/libc.a
+	@mkdir -p $(dir $@)
+	$(CC) $(PICOCFLAGS) -c $< -o $@
+
+build/user/hello-pico.o: user/hello-pico.c build/picolibc/libc.a
+	@mkdir -p $(dir $@)
+	$(CC) $(PICOCFLAGS) -c $< -o $@
+
+build/user/crt0-pico.o: user/crt0-pico.S
+	@mkdir -p $(dir $@)
+	$(CC) $(USERCFLAGS) -c $< -o $@
+
+build/user/hello-pico.elf: build/user/crt0-pico.o build/user/picostubs.o \
+                           build/user/hello-pico.o build/picolibc/libc.a
+	$(CC) $(USERCFLAGS) -fuse-ld=lld -Wl,-Ttext=0x40000000 \
+	  -Wl,-e,_start -Wl,--build-id=none -o $@ $^
+
 # ---- FAT32 RAM virtual disk (16 MiB) ----
 FSDIR := build/fsroot
 build/disk.fat32: build/user/init.elf build/user/ostest.elf build/user/sh.elf \
                    build/user/fbdemo.elf build/user/ls.elf build/user/argtest.elf \
                    build/user/lvdemo.elf build/user/mtest.elf build/user/term.elf \
-                   build/user/toybox.elf
+                   build/user/toybox.elf build/user/hello-pico.elf
 	rm -rf $(FSDIR)
 	mkdir -p $(FSDIR)/bin
 	cp build/user/init.elf $(FSDIR)/bin/init
@@ -94,6 +131,7 @@ build/disk.fat32: build/user/init.elf build/user/ostest.elf build/user/sh.elf \
 	cp build/user/mtest.elf $(FSDIR)/bin/mtest
 	cp build/user/term.elf $(FSDIR)/bin/term
 	cp build/user/toybox.elf $(FSDIR)/bin/toybox
+	cp build/user/hello-pico.elf $(FSDIR)/bin/pico
 	dd if=/dev/zero of=$@ bs=1M count=16 status=none
 	mformat -F -i $@ ::
 	mmd -i $@ ::/bin
@@ -107,6 +145,7 @@ build/disk.fat32: build/user/init.elf build/user/ostest.elf build/user/sh.elf \
 	mcopy -i $@ $(FSDIR)/bin/mtest ::/bin/mtest
 	mcopy -i $@ $(FSDIR)/bin/term ::/bin/term
 	mcopy -i $@ $(FSDIR)/bin/toybox ::/bin/toybox
+	mcopy -i $@ $(FSDIR)/bin/pico ::/bin/pico
 
 # ---- virtio-blk virtual disk (raw, exposed as /dev/vda) ----
 build/vdisk.img:
@@ -151,32 +190,34 @@ build/user/liblvgl.a: $(LVGL_OBJS)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
-# ---- toybox subset (freestanding, qvos libc shim) ----
+# ---- toybox subset, linked against picolibc (OS glue: user/picostubs.c,
+# toybox-isms: third_party/toybox/lib/qvos_pico_shim.c) ----
 TOYBOX_DIR := third_party/toybox
-TOYBOX_CFLAGS := $(USERCFLAGS) -w -DQVOS_TOYBOX -Dnanosleep=qvos_nanosleep \
-                 -Dfstat=qvos_fstat \
-                 -I$(TOYBOX_DIR) -I$(TOYBOX_DIR)/qvos_include
+PICOTOY_CFLAGS := -O2 -g -march=$(MARCH) -mabi=$(MABI) -mcmodel=$(CMODEL) \
+                  -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie -w \
+                  -ffunction-sections -fdata-sections \
+                  -I$(PICODIR)/libc/include -Ibuild/picolibc \
+                  -I$(TOYBOX_DIR) -I$(TOYBOX_DIR)/qvos_include -Iinclude
+
 TOYBOX_CORE := main.c lib/lib.c lib/xwrap.c lib/args.c lib/llist.c \
-               lib/dirtree.c lib/env.c lib/commas.c lib/utf8.c lib/tty.c \
-               lib/qvos_shim.c
+               lib/dirtree.c lib/env.c lib/commas.c lib/utf8.c lib/tty.c
 TOYBOX_APPS := toys/posix/cat.c toys/posix/echo.c toys/posix/false.c \
                toys/posix/head.c toys/posix/ls.c toys/posix/pwd.c \
                toys/posix/sleep.c toys/posix/tail.c toys/posix/true.c \
                toys/posix/uname.c toys/other/yes.c
-TOYBOX_OBJS := $(patsubst %.c,build/toybox/%.o,$(TOYBOX_CORE) $(TOYBOX_APPS))
+PICOTOY_OBJS := $(patsubst %.c,build/toybox-pico/%.o,$(TOYBOX_CORE) $(TOYBOX_APPS)) \
+                build/toybox-pico/lib/qvos_pico_shim.o
 
-build/toybox/%.o: $(TOYBOX_DIR)/%.c $(TOYBOX_DIR)/generated/flags.h
+build/toybox-pico/%.o: $(TOYBOX_DIR)/%.c $(TOYBOX_DIR)/generated/flags.h \
+                       $(TOYBOX_DIR)/qvos_include/pico_compat.h
 	@mkdir -p $(dir $@)
-	$(CC) $(TOYBOX_CFLAGS) -c $< -o $@
+	$(CC) $(PICOTOY_CFLAGS) -include $(TOYBOX_DIR)/qvos_include/pico_compat.h \
+	  -c $< -o $@
 
-# dirtree.c is register-hungry under -O2 with the qvos shim; keep it simple.
-build/toybox/lib/dirtree.o: $(TOYBOX_DIR)/lib/dirtree.c $(TOYBOX_DIR)/generated/flags.h
-	@mkdir -p $(dir $@)
-	$(CC) $(TOYBOX_CFLAGS:-O2=-O0) -c $< -o $@
-
-build/user/toybox.elf: $(TOYBOX_OBJS) $(USERLIBS)
+build/user/toybox.elf: $(PICOTOY_OBJS) build/user/crt0-pico.o \
+                       build/user/picostubs.o build/picolibc/libc.a
 	$(CC) $(USERCFLAGS) -fuse-ld=lld -Wl,-Ttext=0x40000000 \
-	  -Wl,-e,_start -Wl,--build-id=none -o $@ $^
+	  -Wl,-e,_start -Wl,--build-id=none -Wl,--gc-sections -o $@ $^
 
 build/user/init.elf: build/user/init.o $(USERLIBS)
 	$(CC) $(USERCFLAGS) -fuse-ld=lld -Wl,-Ttext=0x40000000 \

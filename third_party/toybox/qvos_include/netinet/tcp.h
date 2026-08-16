@@ -1,0 +1,1 @@
+/* picolibc empty stub for toybox include */

@@ -1,0 +1,22 @@
+# Cross file: picolibc -> qvos RISC-V64 userspace (clang + lld).
+[binaries]
+c = ['clang', '--target=riscv64-unknown-elf', '-nostdlib']
+cpp = ['clang', '--target=riscv64-unknown-elf', '-nostdlib']
+c_ld = 'lld'
+cpp_ld = 'lld'
+ar = 'llvm-ar'
+as = 'clang'
+nm = 'llvm-nm'
+strip = 'llvm-strip'
+
+[host_machine]
+system = 'none'
+cpu_family = 'riscv64'
+cpu = 'riscv'
+endian = 'little'
+
+[properties]
+skip_sanity_check = true
+c_args = ['-march=rv64imafdcv_zicsr_zifencei', '-mabi=lp64d', '-mcmodel=medany', '-ffreestanding']
+c_link_args = ['-march=rv64imafdcv_zicsr_zifencei', '-mabi=lp64d', '-mcmodel=medany']
+librt = '-lclang_rt.builtins'
