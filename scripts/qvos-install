@@ -1,0 +1,29 @@
+#!/bin/sh
+# qvos-install — copy a built user ELF into the FAT32 /bin and rebuild kernel.
+#
+# Usage:
+#   scripts/qvos-cc user/myprog.c -o build/user/myprog.elf
+#   scripts/qvos-install myprog
+#   make run
+
+set -e
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+NAME=${1:?usage: scripts/qvos-install <name>}
+ELF="$ROOT/build/user/$NAME.elf"
+
+[ -f "$ELF" ] || {
+    echo "qvos-install: $ELF not found (run qvos-cc first)" >&2
+    exit 1
+}
+
+cd "$ROOT"
+[ -f build/disk.fat32 ] || make build/disk.fat32
+mkdir -p build/fsroot/bin
+cp "$ELF" "build/fsroot/bin/$NAME"
+
+# Overwrite if present, otherwise append to ::/bin.
+mcopy -o -i build/disk.fat32 "build/fsroot/bin/$NAME" "::/bin/$NAME" \
+  2>/dev/null || mcopy -i build/disk.fat32 "build/fsroot/bin/$NAME" "::/bin/$NAME"
+
+make build/kernel.elf
+echo "qvos-install: /bin/$NAME installed; run 'make run'"

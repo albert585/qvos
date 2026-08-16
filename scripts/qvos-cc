@@ -1,0 +1,19 @@
+#!/bin/sh
+# qvos-cc — compile a userspace program for qvos.
+#
+# Usage:
+#   scripts/qvos-cc user/myprog.c -o build/user/myprog.elf
+#
+# The host is x86_64; the target is freestanding RISC-V 64 with qvos's own
+# crt0 and libc linked in.
+
+set -e
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+
+exec clang --target=riscv64-unknown-elf \
+  -O2 -g -march=rv64imafdcv_zicsr_zifencei -mabi=lp64d -mcmodel=medany \
+  -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie \
+  -I"$ROOT/user" -I"$ROOT/include" \
+  -I"$ROOT/third_party/lvgl" -DLV_CONF_INCLUDE_SIMPLE \
+  -fuse-ld=lld -Wl,-Ttext=0x40000000 -Wl,-e,_start -Wl,--build-id=none \
+  "$@" "$ROOT/user/crt0.S" "$ROOT/user/libc.c"
