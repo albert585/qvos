@@ -9,12 +9,15 @@
 #include <kernel/pmm.h>
 #include <kernel/proc.h>
 #include <kernel/smp.h>
+#include <kernel/virtioblk.h>
+#include <kernel/virtioinput.h>
+#include <kernel/virtiokbd.h>
 #include <kernel/vm.h>
 
 __attribute__((noreturn)) void kmain(uint64_t hartid, uint64_t dtb)
 {
     klog_init();
-    klog_puts("\n==== qvos Stage 8 ====\n");
+    klog_puts("\n==== qvos Stage 10 ====\n");
     klog_puts("[qvos] boot hart ");
     klog_hex(hartid);
     klog_puts("\n");
@@ -24,6 +27,9 @@ __attribute__((noreturn)) void kmain(uint64_t hartid, uint64_t dtb)
     vm_init();
     trap_init_percpu();
     fb_init();
+    vda_init();
+    kbd_init();
+    mouse_init();
     proc_init();
     file_init();
 
@@ -42,7 +48,7 @@ __attribute__((noreturn)) void kmain(uint64_t hartid, uint64_t dtb)
 
     trap_enable_timer(10000);
     smp_start_secondary_harts();
-    klog_puts("[qvos] STAGE8_OK: FAT32 + SMP + framebuffer running\n");
+    klog_puts("[qvos] STAGE10_OK: FAT32 + SMP + framebuffer + virtio-blk + mouse + kbd running\n");
 
     scheduler();   /* never returns */
 }

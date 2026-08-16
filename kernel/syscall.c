@@ -1,6 +1,7 @@
 /* POSIX-subset syscall dispatch: process + console + FAT32 file syscalls.
  */
 #include <kernel/file.h>
+#include <kernel/framebuffer.h>
 #include <kernel/kalloc.h>
 #include <kernel/klog.h>
 #include <kernel/panic.h>
@@ -21,6 +22,26 @@ struct qvos_stat {
 static uint64_t arg(struct trapframe *tf, int n)
 {
     return tf->gpr[10 + n];
+}
+
+static int copyout(pagetable_t pg, const void *src, uint64_t dstva, size_t len)
+{
+    const uint8_t *s = (const uint8_t *)src;
+
+    while (len > 0) {
+        uint64_t pa = vm_translate(pg, dstva);
+        if (!pa)
+            return -1;
+        size_t n = PAGE_SIZE - (dstva & PAGE_MASK);
+        if (n > len)
+            n = len;
+        for (size_t i = 0; i < n; i++)
+            ((volatile uint8_t *)pa)[i] = s[i];
+        s += n;
+        dstva += n;
+        len -= n;
+    }
+    return 0;
 }
 
 static long sys_write(struct trapframe *tf)
@@ -123,7 +144,7 @@ static long sys_fstat(struct trapframe *tf)
     uint64_t uva = arg(tf, 1);
     struct qvos_stat st;
 
-    if (file_stat(fd_get(fd), (uint32_t *)&st.st_size, &st.st_mode) != 0)
+    if (file_stat(fd_get(fd), &st.st_size, &st.st_mode) != 0)
         return -1;
     uint64_t pa = vm_translate(myproc()->pg, uva);
     if (!pa)
@@ -159,6 +180,44 @@ static long sys_pipe(struct trapframe *tf)
         *(volatile uint32_t *)pa = (uint32_t)fds[i];
     }
     return 0;
+}
+
+static long sys_getdents(struct trapframe *tf)
+{
+    int fd = (int)arg(tf, 0);
+    uint64_t uva = arg(tf, 1);
+    uint32_t max = (uint32_t)arg(tf, 2);
+    struct file *f = fd_get(fd);
+    struct qvos_dirent *ents;
+    long count = 0;
+
+    if (!f || !uva)
+        return -1;
+    if (max == 0)
+        return 0;
+    if (max > 64)
+        max = 64;
+
+    ents = kmalloc((size_t)max * sizeof(*ents));
+    if (!ents)
+        return -1;
+
+    for (uint32_t i = 0; i < max; i++) {
+        if (file_readdir(f, f->offset + i, &ents[i]) != 0)
+            break;
+        count++;
+    }
+    for (long i = 0; i < count; i++) {
+        if (copyout(myproc()->pg, &ents[i],
+                    uva + (uint64_t)i * sizeof(*ents), sizeof(*ents)) != 0) {
+            kfree(ents);
+            return -1;
+        }
+    }
+    if (count > 0)
+        f->offset += (uint32_t)count;
+    kfree(ents);
+    return count;
 }
 
 static long sys_execve(struct trapframe *tf)
@@ -286,6 +345,86 @@ static long sys_reboot(struct trapframe *tf)
     return -1;
 }
 
+/* ---- virtio-gpu framebuffer syscalls ---- */
+
+static long sys_fbmap(void)
+{
+    struct proc *p = myproc();
+    uint32_t size;
+
+    if (!p || !p->pg || !fb_active())
+        return -1;
+    size = fb_size_bytes();
+    if (size == 0 || size > FB_USER_VA_SIZE)
+        return -1;
+
+    /* Share the GPU backing store directly with the process: U/RW, no X.
+     * Repeated calls just re-map the same pages and are idempotent. */
+    if (vm_map(p->pg, FB_USER_VA, fb_paddr(), size,
+               PTE_U | PTE_R | PTE_W | PTE_A | PTE_D) != 0)
+        return -1;
+    return (long)FB_USER_VA;
+}
+
+static long sys_fbinfo(struct trapframe *tf)
+{
+    uint64_t uva = arg(tf, 0);
+    struct qvos_fb_info info;
+
+    if (!uva || !fb_active())
+        return -1;
+    info.width = fb_width();
+    info.height = fb_height();
+    info.bpp = 32;
+    info.pitch = info.width * 4;
+    info.size_bytes = info.pitch * info.height;
+    info.phys = fb_paddr();
+
+    if (copyout(myproc()->pg, &info, uva, sizeof(info)) != 0)
+        return -1;
+    return 0;
+}
+
+static long sys_fbflush(void)
+{
+    if (!fb_active())
+        return -1;
+    fb_flush();
+    return 0;
+}
+
+static long sys_fbtext(struct trapframe *tf)
+{
+    uint64_t uva = arg(tf, 0);
+    size_t n = (size_t)arg(tf, 1);
+    char *buf;
+
+    if (!fb_active())
+        return -1;
+    if (n == 0)
+        return 0;
+    if (n > 4096)
+        n = 4096;
+    buf = kmalloc(n);
+    if (!buf)
+        return -1;
+    if (copyin(myproc()->pg, buf, uva, n) != 0) {
+        kfree(buf);
+        return -1;
+    }
+    fb_console_write(buf, n);
+    kfree(buf);
+    return (long)n;
+}
+
+static long sys_fbclear(struct trapframe *tf)
+{
+    if (!fb_active())
+        return -1;
+    fb_console_clear((uint32_t)arg(tf, 0));
+    return 0;
+}
+
 void syscall(struct trapframe *tf)
 {
     uint64_t no = tf->gpr[17];
@@ -299,7 +438,14 @@ void syscall(struct trapframe *tf)
     case SYS_open:    ret = sys_open(tf); break;
     case SYS_close:   ret = sys_close(tf); break;
     case SYS_waitpid: ret = sys_waitpid(tf); break;
-    case SYS_execve:  ret = sys_execve(tf); break;
+    case SYS_execve:
+        /* proc_exec installs the new user context with a0 = argc; the
+         * usual "a0 = ret" below would clobber argc with the exec return
+         * value (0), which is why every shell-spawned program saw argc==0. */
+        if (sys_execve(tf) == 0)
+            return;
+        ret = -1;
+        break;
     case SYS_lseek:   ret = sys_lseek(tf); break;
     case SYS_getpid:  ret = sys_getpid(); break;
     case SYS_sbrk:    ret = sys_sbrk(tf); break;
@@ -309,7 +455,13 @@ void syscall(struct trapframe *tf)
     case SYS_fstat:   ret = sys_fstat(tf); break;
     case SYS_dup:     ret = sys_dup(tf); break;
     case SYS_pipe:    ret = sys_pipe(tf); break;
+    case SYS_getdents: ret = sys_getdents(tf); break;
     case SYS_reboot:  ret = sys_reboot(tf); break;
+    case SYS_fbmap:   ret = sys_fbmap(); break;
+    case SYS_fbinfo:  ret = sys_fbinfo(tf); break;
+    case SYS_fbflush: ret = sys_fbflush(); break;
+    case SYS_fbtext:  ret = sys_fbtext(tf); break;
+    case SYS_fbclear: ret = sys_fbclear(tf); break;
     default:
         klog_puts("[qvos] unknown syscall ");
         klog_hex(no);

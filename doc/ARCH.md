@@ -57,13 +57,79 @@
 - Freestanding libc subset in `user/`: `crt0.S`, syscall wrappers (ecall ABI: a7=sysno), printf/malloc-lite (sbrk), string functions.
 - `/bin/ostest`: fork/exit/wait, pipe, open/read files, mmap-less malloc, float math, RVV dot-product, signals-lite.
 - `/bin/sh`: builtin echo/cat/help/ps/exit + spawn programs via fork/exec/wait.
+- `/bin/ls`: `SYS_getdents` directory listing; works on FAT32 directories and
+  the virtual `/dev` directory. Successful execve keeps the new image's
+  argc/argv instead of overwriting a0 with the syscall return value.
+- `/bin/argtest`: exit-code probe used by ostest to regression-test that
+  execve delivers the expected argc/argv.
 
 ## 11. Framebuffer & fallback shell
 - Minimal virtio-mmio driver for device 0x1000_8000 (GPU): negotiate `VIRTIO_GPU_EVENT_DISPLAY`, get scanout, 32bpp XRGB.
 - `fb_init/fb_put_pixel/fb_fill`; console mirrors serial to fb; panic paints red screen + message, then drops to fallback shell on UART (fb if alive).
+- Userspace access: `SYS_fbmap` maps the GPU backing store at fixed VA
+  `0x30000000` (U/RW, shared, fork-safe); `SYS_fbflush` pushes changes,
+  `SYS_fbinfo/fbtext/fbclear` expose metadata and the kernel 8x8 console.
+  `/bin/fbdemo` draws an animated demo straight from U-mode.
+- Devfs-lite: `file_open` routes `/dev/*` before FAT32. `/dev/fb0` is a raw
+  character device (read = framebuffer bytes at offset, write = pixels +
+  auto-flush, fstat = fb size); `/dev/null` and `/dev/zero` round it out.
 
-## 12. Syscall subset (standard tier)
+## 12. virtio-blk storage
+- Scans the virtio-mmio window (0x1000_1000..0x1002_0000) for device id 2;
+  QEMU attaches the raw `build/vdisk.img` on `virtio-mmio-bus.6`.
+- Modern v2 negotiation, one 64-entry virtqueue, polled completion.
+  `VIRTIO_BLK_T_IN/OUT` requests carry header + data + one-byte status;
+  partial sectors use read-modify-write; capacity is read from config space.
+- VFS exposes it as `/dev/vda` (`FD_DEVVDA`): open/read/write/lseek/fstat,
+  block-device mode in fstat, persistent across reboots via the host file.
+
+## 13. virtio-input mouse/tablet + keyboard
+- Scans for device id 18; QEMU attaches `virtio-keyboard-device` on
+  `virtio-mmio-bus.4` and `virtio-tablet-device` on bus.5.  `kbd_init()` claims
+  the lower slot, `mouse_init()` skips it and claims the next one.
+- One 64-entry eventq per device: the driver pre-posts 64 device-writable
+  8-byte buffers, polls the used ring, buffers events in a 256-slot FIFO and
+  re-posts each descriptor immediately.
+- Exposed as `/dev/kbd` and `/dev/mouse` (`FD_DEVKBD/FD_DEVMOUSE`): `read`
+  returns packed `struct qvos_input_event` records (`EV_KEY`, `EV_ABS`,
+  `EV_SYN`).  `/bin/mtest` dumps mouse events; LVGL's pointer indev consumes
+  the tablet (with 0..32767 -> pixel scaling); `/bin/term` runs the real
+  `/bin/sh` behind a pipe-based user-space pseudo-terminal and renders its
+  stdout on the framebuffer.
+
+## 14. Syscall subset (standard tier)
 process: fork, execve, waitpid, exit, getpid, getppid, sbrk, yield, kill, sleep/nanosleep
 fs: open, close, read, write, lseek, fstat, getdents, mkdir, unlink, dup, pipe
 misc: time/times, gettimeofday, brk (no-op beyond sbrk), reboot
+fb: fbmap, fbinfo, fbflush, fbtext, fbclear (shared virtio-gpu framebuffer)
 All are real implementations; no stubs returning ENOSYS in the required set.
+
+## 15. LVGL v9 port
+- Sources vendored under `third_party/lvgl`, compiled once into a static
+  `liblvgl.a` and linked only into `/bin/lvdemo`.
+- `user/lv_conf.h`: `LV_COLOR_DEPTH 32`, software draw, `LV_OS_NONE`,
+  built-in malloc/sprintf/string shims, Montserrat 14, asserts/log off.
+- Display driver: one full-screen XRGB8888 buffer in qvos user memory;
+  `flush_cb` copies it into the `SYS_fbmap` framebuffer and calls
+  `SYS_fbflush`; manual tick callback (no clock syscall yet).
+- Pointer input: an LVGL `LV_INDEV_TYPE_POINTER` reads `/dev/mouse` in its
+  read callback and maps `ABS_X/ABS_Y/BTN_LEFT` to `lv_indev_data_t`;
+  clicking the demo button exits `lvdemo`.
+- Visible cursor: a 14x14 cyan/white `lv_obj` registered with
+  `lv_indev_set_cursor()`, so the pointer position is always visible.
+
+## 16. toybox subset
+- toybox v0.8.13 vendored under `third_party/toybox`; `.config` enables only
+  read-only-safe applets (`echo cat ls pwd true false yes head tail sleep
+  uname`), plus toybox core.
+- `toys.h` is patched to include `qvos_shim.h` instead of the full POSIX
+  header set; `lib/qvos_shim.c` implements the missing libc/POSIX surface
+  (dirent, stat, stdio, env, regex/tty/signal stubs, RISC-V setjmp) on top
+  of qvos syscalls.  qvos `libc.c` gained a full printf family and FILE layer.
+- `lib/dirtree.c` is compiled at -O0: the qvos vector-optimized `memcpy/
+  memset` plus the large shim `struct stat` exposes a stack-layout
+  interaction under -O2; -O0 is the conservative fix.
+- `/bin/toybox` links as a multiplexer; qvos shell tries `/bin/<name>` first
+  and falls back to `/bin/toybox` with the same argv[0].
+- Freestanding shim: `include/inttypes.h` provides the PRI macros LVGL asks
+  for on a cross-compiled, no-sysroot toolchain.

@@ -17,4 +17,8 @@ void fb_console_write(const char *s, size_t n);
 uint32_t fb_width(void);
 uint32_t fb_height(void);
 
+/* Backing-store metadata for the userspace fbmmap syscall. */
+uint64_t fb_paddr(void);      /* physical address of the 2D resource   */
+uint32_t fb_size_bytes(void); /* width * height * 4 (0 when inactive)   */
+
 #endif

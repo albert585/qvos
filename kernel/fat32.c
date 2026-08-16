@@ -168,10 +168,27 @@ int fat32_dir_lookup(uint32_t dir_cluster, const char *name,
             out->start_cluster = ((uint32_t)de.cluster_hi << 16) |
                                  de.cluster_lo;
             out->size = de.size;
+            out->is_dir = (de.attr & FAT32_ATTR_DIRECTORY) != 0;
             return 0;
         }
     }
     return -1;
+}
+
+int fat32_readdir(struct fat32_file *f, uint32_t index,
+                  struct fat32_dirent *de)
+{
+    if (!f || !f->is_dir)
+        return -1;
+
+    struct fat32_dir_iter it = { f->start_cluster, 0, 0 };
+    uint32_t n = 0;
+    while (fat32_dir_next(&it, de)) {
+        if (n == index)
+            return 0;
+        n++;
+    }
+    return -1;   /* end of directory */
 }
 
 int fat32_open(const char *path, struct fat32_file *f)
@@ -179,10 +196,16 @@ int fat32_open(const char *path, struct fat32_file *f)
     uint32_t dir = fat_fs.root_cluster;
     const char *p = path;
 
+    f->is_dir = 0;
     while (*p == '/')
         p++;
-    if (*p == 0)
-        return -1;
+    if (*p == 0) {
+        /* The root directory itself. */
+        f->start_cluster = fat_fs.root_cluster;
+        f->size = 0;
+        f->is_dir = 1;
+        return 0;
+    }
 
     for (;;) {
         const char *q = p;

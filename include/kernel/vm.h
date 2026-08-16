@@ -27,6 +27,8 @@
 #define USER_VA_TOP    0x0000004000000000UL   /* 256 GiB user space */
 #define USER_STACK_TOP (USER_VA_TOP - 0x100000UL)
 #define TRAPFRAME_VA   0x0000000020000000UL   /* 4 pages, per-process */
+#define FB_USER_VA     0x0000000030000000UL   /* shared virtio-gpu fb mmap */
+#define FB_USER_VA_SIZE (64UL * 1024 * 1024)  /* 4K*4K*32bpp worst case */
 
 typedef uint64_t pte_t;
 typedef uint64_t *pagetable_t;

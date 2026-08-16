@@ -10,6 +10,7 @@
 #include <kernel/framebuffer.h>
 #include <kernel/klog.h>
 #include <kernel/pmm.h>
+#include <kernel/spinlock.h>
 #include <kernel/string.h>
 #include <kernel/vm.h>
 #include <atomic.h>
@@ -144,6 +145,7 @@ static volatile struct vring_avail *avail;
 static volatile struct vring_used *used;
 static uint16_t used_seen;
 static struct vgpu_hdr gpu_resp;
+static spinlock_t fb_lock;   /* serializes virtqueue submissions (2 harts) */
 
 static uint32_t fb_w, fb_h;
 static volatile uint32_t *fb_base;
@@ -167,6 +169,8 @@ static uint64_t virt_to_phys(void *p)
 
 static void gpu_cmd(void *out, size_t out_len, void *in, size_t in_len)
 {
+    uint64_t flags = spin_lock_irqsave(&fb_lock);
+
     uint16_t idx = avail->idx;
     int d0 = (int)(idx % VQ_SIZE);
 
@@ -195,6 +199,8 @@ static void gpu_cmd(void *out, size_t out_len, void *in, size_t in_len)
     while (used->idx == used_seen)
         __asm__ volatile("" : : : "memory");
     used_seen = used->idx;
+
+    spin_unlock_irqrestore(&fb_lock, flags);
 }
 
 static int virtio_gpu_init(void)
@@ -468,3 +474,17 @@ void fb_console_write(const char *s, size_t n)
 
 uint32_t fb_width(void)  { return fb_w; }
 uint32_t fb_height(void) { return fb_h; }
+
+uint64_t fb_paddr(void)
+{
+    if (!fb_ok)
+        return 0;
+    return virt_to_phys((void *)fb_base);
+}
+
+uint32_t fb_size_bytes(void)
+{
+    if (!fb_ok)
+        return 0;
+    return fb_w * fb_h * 4;
+}

@@ -156,6 +156,15 @@ static int vm_va_is_common(uint64_t va)
     return 0;
 }
 
+/* The framebuffer backing store is owned by the virtio-gpu driver.  When a
+ * process maps it with SYS_fbmap those PTEs point at GPU-owned pages: exit
+ * must only drop the PTE, and fork must share the mapping instead of
+ * copying or freeing the physical pages. */
+static int vm_va_is_fb(uint64_t va)
+{
+    return va >= FB_USER_VA && va < FB_USER_VA + FB_USER_VA_SIZE;
+}
+
 static void vm_free_walk(pte_t *pt, int level, uint64_t base)
 {
     for (int i = 0; i < 512; i++) {
@@ -166,7 +175,7 @@ static void vm_free_walk(pte_t *pt, int level, uint64_t base)
         uint64_t pa = PTE2PA(pte);
 
         if ((pte & (PTE_R | PTE_W | PTE_X)) || level == 0) {
-            if (!vm_va_is_common(va))
+            if (!vm_va_is_common(va) && !vm_va_is_fb(va))
                 pmm_free_page((void *)pa);
         } else {
             vm_free_walk((pte_t *)pa, level - 1, va);
@@ -194,6 +203,14 @@ static int vm_copy_walk(pte_t *pt, int level, uint64_t base,
         uint64_t pa = PTE2PA(pte);
 
         if ((pte & (PTE_R | PTE_W | PTE_X)) || level == 0) {
+            if (vm_va_is_fb(va)) {
+                /* GPU-owned pages: map the same physical page into the
+                 * child instead of COW/copying a private framebuffer. */
+                if (vm_map(newpg, va, pa, PAGE_SIZE,
+                           (pte & 0x1ff) & ~PTE_A) != 0)
+                    return -1;
+                continue;
+            }
             if (vm_va_is_common(va))
                 continue;
             void *mem = pmm_alloc_page();

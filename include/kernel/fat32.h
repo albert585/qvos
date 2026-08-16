@@ -56,6 +56,7 @@ struct fat32_dirent {
 struct fat32_file {
     uint32_t start_cluster;
     uint32_t size;
+    int      is_dir;
 };
 
 struct fat32_dir_iter {
@@ -85,5 +86,7 @@ int  fat32_read(struct fat32_file *f, void *dst, uint32_t offset, size_t n);
 int  fat32_dir_next(struct fat32_dir_iter *it, struct fat32_dirent *de);
 int  fat32_dir_lookup(uint32_t dir_cluster, const char *name,
                       struct fat32_file *out);
+int  fat32_readdir(struct fat32_file *f, uint32_t index,
+                   struct fat32_dirent *de);
 
 #endif
