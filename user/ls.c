@@ -3,7 +3,7 @@
 
 int main(int argc, char **argv)
 {
-    const char *path = (argc > 1) ? argv[1] : "/";
+    const char *path = (argc > 1) ? argv[1] : ".";
     int fd = open(path, 0);   /* O_RDONLY */
     if (fd < 0) {
         printf("ls: %s: no such file or directory\n", path);

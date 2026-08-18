@@ -45,7 +45,7 @@ OBJS := build/arch/entry.o \
         build/kernel/panic.o \
         build/kernel/pmm.o \
         build/kernel/proc.o \
-        build/kernel/ramdisk.o \
+        build/kernel/rtc.o \
         build/kernel/sbi.o \
         build/kernel/smp.o \
         build/kernel/spinlock.o \
@@ -69,10 +69,6 @@ build/kernel/%.o: kernel/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 build/kernel/stage5_blob.o: kernel/stage5_blob.S build/user/stage5.bin
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-build/kernel/ramdisk.o: kernel/ramdisk.S build/disk.fat32
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -113,43 +109,35 @@ build/user/hello-pico.elf: build/user/crt0-pico.o build/user/picostubs.o \
 	$(CC) $(USERCFLAGS) -fuse-ld=lld -Wl,-Ttext=0x40000000 \
 	  -Wl,-e,_start -Wl,--build-id=none -o $@ $^
 
-# ---- FAT32 RAM virtual disk (16 MiB) ----
-FSDIR := build/fsroot
-build/disk.fat32: build/user/init.elf build/user/ostest.elf build/user/sh.elf \
-                   build/user/fbdemo.elf build/user/ls.elf build/user/argtest.elf \
-                   build/user/lvdemo.elf build/user/mtest.elf build/user/term.elf \
-                   build/user/toybox.elf build/user/hello-pico.elf
-	rm -rf $(FSDIR)
-	mkdir -p $(FSDIR)/bin
-	cp build/user/init.elf $(FSDIR)/bin/init
-	cp build/user/ostest.elf $(FSDIR)/bin/ostest
-	cp build/user/sh.elf $(FSDIR)/bin/sh
-	cp build/user/fbdemo.elf $(FSDIR)/bin/fbdemo
-	cp build/user/ls.elf $(FSDIR)/bin/ls
-	cp build/user/argtest.elf $(FSDIR)/bin/argtest
-	cp build/user/lvdemo.elf $(FSDIR)/bin/lvdemo
-	cp build/user/mtest.elf $(FSDIR)/bin/mtest
-	cp build/user/term.elf $(FSDIR)/bin/term
-	cp build/user/toybox.elf $(FSDIR)/bin/toybox
-	cp build/user/hello-pico.elf $(FSDIR)/bin/pico
-	dd if=/dev/zero of=$@ bs=1M count=16 status=none
+# ---- virtio-blk root disk (persistent FAT32; created once) ----
+# The kernel prefers /dev/vda as "/" when it holds a usable FAT32 rootfs.
+# The image is only (re)created when missing, so files you write from
+# inside qvos survive rebuilds; delete it to re-provision from scratch.
+USERBINS := build/user/init.elf build/user/ostest.elf build/user/sh.elf \
+            build/user/fbdemo.elf build/user/ls.elf build/user/argtest.elf \
+            build/user/lvdemo.elf build/user/mtest.elf build/user/term.elf \
+            build/user/toybox.elf build/user/hello-pico.elf build/user/wtest.elf
+build/vdisk.img: $(USERBINS)
+	dd if=/dev/zero of=$@ bs=1M count=$(VDISK_MB) status=none
 	mformat -F -i $@ ::
 	mmd -i $@ ::/bin
-	mcopy -i $@ $(FSDIR)/bin/init ::/bin/init
-	mcopy -i $@ $(FSDIR)/bin/ostest ::/bin/ostest
-	mcopy -i $@ $(FSDIR)/bin/sh ::/bin/sh
-	mcopy -i $@ $(FSDIR)/bin/fbdemo ::/bin/fbdemo
-	mcopy -i $@ $(FSDIR)/bin/ls ::/bin/ls
-	mcopy -i $@ $(FSDIR)/bin/argtest ::/bin/argtest
-	mcopy -i $@ $(FSDIR)/bin/lvdemo ::/bin/lvdemo
-	mcopy -i $@ $(FSDIR)/bin/mtest ::/bin/mtest
-	mcopy -i $@ $(FSDIR)/bin/term ::/bin/term
-	mcopy -i $@ $(FSDIR)/bin/toybox ::/bin/toybox
-	mcopy -i $@ $(FSDIR)/bin/pico ::/bin/pico
+	mcopy -i $@ build/user/init.elf ::/bin/init
+	mcopy -i $@ build/user/ostest.elf ::/bin/ostest
+	mcopy -i $@ build/user/sh.elf ::/bin/sh
+	mcopy -i $@ build/user/fbdemo.elf ::/bin/fbdemo
+	mcopy -i $@ build/user/ls.elf ::/bin/ls
+	mcopy -i $@ build/user/argtest.elf ::/bin/argtest
+	mcopy -i $@ build/user/lvdemo.elf ::/bin/lvdemo
+	mcopy -i $@ build/user/mtest.elf ::/bin/mtest
+	mcopy -i $@ build/user/term.elf ::/bin/term
+	mcopy -i $@ build/user/toybox.elf ::/bin/toybox
+	mcopy -i $@ build/user/hello-pico.elf ::/bin/pico
+	mcopy -i $@ build/user/wtest.elf ::/bin/wtest
+	@echo "[vdisk] provisioned persistent rootfs at $@ (delete to reset)"
 
-# ---- virtio-blk virtual disk (raw, exposed as /dev/vda) ----
-build/vdisk.img:
-	dd if=/dev/zero of=$@ bs=1M count=$(VDISK_MB) status=none
+.PHONY: rootfs-reset
+rootfs-reset:
+	rm -f build/vdisk.img
 
 build/user/stage5.elf: user/stage5_test.c
 	@mkdir -p $(dir $@)
@@ -201,15 +189,17 @@ PICOTOY_CFLAGS := -O2 -g -march=$(MARCH) -mabi=$(MABI) -mcmodel=$(CMODEL) \
 
 TOYBOX_CORE := main.c lib/lib.c lib/xwrap.c lib/args.c lib/llist.c \
                lib/dirtree.c lib/env.c lib/commas.c lib/utf8.c lib/tty.c
-TOYBOX_APPS := toys/posix/cat.c toys/posix/echo.c toys/posix/false.c \
-               toys/posix/head.c toys/posix/ls.c toys/posix/pwd.c \
-               toys/posix/sleep.c toys/posix/tail.c toys/posix/true.c \
-               toys/posix/uname.c toys/other/yes.c
+TOYBOX_APPS := toys/posix/cat.c toys/posix/cp.c toys/posix/echo.c \
+               toys/posix/false.c toys/posix/head.c toys/posix/ls.c \
+               toys/posix/pwd.c toys/posix/sleep.c toys/posix/tail.c \
+               toys/posix/touch.c toys/posix/true.c toys/posix/uname.c \
+               toys/other/yes.c
 PICOTOY_OBJS := $(patsubst %.c,build/toybox-pico/%.o,$(TOYBOX_CORE) $(TOYBOX_APPS)) \
                 build/toybox-pico/lib/qvos_pico_shim.o
 
 build/toybox-pico/%.o: $(TOYBOX_DIR)/%.c $(TOYBOX_DIR)/generated/flags.h \
-                       $(TOYBOX_DIR)/qvos_include/pico_compat.h
+                       $(TOYBOX_DIR)/qvos_include/pico_compat.h \
+                       build/picolibc/libc.a
 	@mkdir -p $(dir $@)
 	$(CC) $(PICOTOY_CFLAGS) -include $(TOYBOX_DIR)/qvos_include/pico_compat.h \
 	  -c $< -o $@
@@ -240,6 +230,10 @@ build/user/ls.elf: build/user/ls.o $(USERLIBS)
 	  -Wl,-e,_start -Wl,--build-id=none -o $@ $^
 
 build/user/argtest.elf: build/user/argtest.o $(USERLIBS)
+	$(CC) $(USERCFLAGS) -fuse-ld=lld -Wl,-Ttext=0x40000000 \
+	  -Wl,-e,_start -Wl,--build-id=none -o $@ $^
+
+build/user/wtest.elf: build/user/wtest.o $(USERLIBS)
 	$(CC) $(USERCFLAGS) -fuse-ld=lld -Wl,-Ttext=0x40000000 \
 	  -Wl,-e,_start -Wl,--build-id=none -o $@ $^
 

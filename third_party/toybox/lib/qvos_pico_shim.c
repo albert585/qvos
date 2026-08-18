@@ -25,7 +25,20 @@ dev_t dev_makedev(int maj, int min)
     return (dev_t)(((unsigned)maj << 16) | (unsigned)min);
 }
 
-/* ---- copy loop (qvos FAT32 is read-only; this is rarely used) ------ */
+/* ---- xattr (no such thing on qvos; cp's -x path becomes a no-op) ---- */
+
+ssize_t xattr_flist(int fd, char *list, size_t size)
+{ (void)fd; (void)list; (void)size; errno = ENOTSUP; return -1; }
+
+ssize_t xattr_fget(int fd, const char *name, void *value, size_t size)
+{ (void)fd; (void)name; (void)value; (void)size; errno = ENOTSUP; return -1; }
+
+ssize_t xattr_fset(int fd, const char *name, const void *value,
+                   size_t size, int flags)
+{ (void)fd; (void)name; (void)value; (void)size; (void)flags;
+  errno = ENOTSUP; return -1; }
+
+/* ---- copy loop ------------------------------------------------------ */
 
 long long
 sendfile_len(int in, int out, long long bytes, long long *consumed)

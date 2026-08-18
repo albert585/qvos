@@ -7,6 +7,13 @@
 #include <kernel/syscall.h>
 
 #define FILE_TABLE_SIZE 128
+#define MOUNT_MAX 8
+
+struct mount {
+    char path[128];
+    struct fat32_fs fs;
+    int used;
+};
 
 enum file_type {
     FD_NONE = 0,
@@ -33,6 +40,9 @@ struct file {
 };
 
 int pipe_alloc(int fds[2]);
+
+int vfs_mount(const char *source, const char *target);
+int vfs_chdir(const char *path, char *out, size_t outsz);
 
 void file_init(void);
 struct file *file_console(int idx);

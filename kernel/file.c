@@ -18,6 +18,8 @@
 #define O_RDONLY 0
 #define O_WRONLY 1
 #define O_RDWR   2
+#define O_CREAT  0x0040
+#define O_TRUNC  0x0200
 
 #define PIPE_BUF_SIZE 512
 #define NPIPE 8
@@ -31,7 +33,192 @@ struct pipe {
 
 static struct pipe pipes[NPIPE];
 static struct file ftable[FILE_TABLE_SIZE];
+static struct mount mounts[MOUNT_MAX];
 static spinlock_t file_lock;
+
+/* ---- virtio-blk backend for FAT32 mounts ---- */
+
+static int vda_read_at(void *dev, uint32_t off, void *dst, size_t n)
+{
+    (void)dev;
+    return vda_read(dst, off, n) == (int)n ? 0 : -1;
+}
+
+static int vda_write_at(void *dev, uint32_t off, const void *src, size_t n)
+{
+    (void)dev;
+    return vda_write(src, off, n) == (int)n ? 0 : -1;
+}
+
+static const char *mount_basename(const char *path)
+{
+    const char *base = path;
+
+    for (const char *p = path; *p; p++)
+        if (*p == '/')
+            base = p + 1;
+    return base;
+}
+
+/* Turn a possibly-relative path into a normalized absolute path.  Handles
+ * ".", ".." and repeated slashes.  Returns 0 on success. */
+static int path_absolutize(const char *cwd, const char *path,
+                           char *out, size_t outsz)
+{
+    char tmp[256];
+    char *comps[64];
+    int top = 0;
+    size_t n = 0;
+    const char *base;
+    const char *p;
+
+    if (!path || !out || outsz < 2)
+        return -1;
+    if (path[0] == '/') {
+        base = "/";
+        p = path + 1;
+    } else {
+        base = cwd ? cwd : "/";
+        p = path;
+    }
+
+    for (const char *s = base; *s && n + 1 < sizeof(tmp); s++)
+        tmp[n++] = *s;
+    if (n == 0 || tmp[n - 1] != '/')
+        tmp[n++] = '/';
+    for (const char *s = p; *s && n + 1 < sizeof(tmp); s++)
+        tmp[n++] = *s;
+    tmp[n] = 0;
+
+    char *s = tmp;
+    while (*s) {
+        while (*s == '/')
+            *s++ = 0;
+        if (!*s)
+            break;
+        char *start = s;
+        while (*s && *s != '/')
+            s++;
+        if (*s) {
+            *s = 0;
+            s++;
+        }
+        if (strcmp(start, ".") == 0)
+            continue;
+        if (strcmp(start, "..") == 0) {
+            if (top > 0)
+                top--;
+            continue;
+        }
+        if (top < 64)
+            comps[top++] = start;
+    }
+
+    n = 0;
+    out[n++] = '/';
+    for (int i = 0; i < top; i++) {
+        size_t len = strlen(comps[i]);
+        if (n + len + 1 >= outsz)
+            return -1;
+        if (i > 0)
+            out[n++] = '/';
+        memcpy(out + n, comps[i], len);
+        n += len;
+    }
+    out[n] = 0;
+    return 0;
+}
+
+int vfs_chdir(const char *path, char *out, size_t outsz)
+{
+    struct proc *p = myproc();
+    char abs[128];
+    struct file *f;
+    uint64_t size;
+    uint32_t type;
+
+    if (!p)
+        return -1;
+    if (path_absolutize(p->cwd, path, abs, sizeof(abs)) != 0)
+        return -1;
+    f = file_open(abs, 0);
+    if (!f)
+        return -1;
+    if (file_stat(f, &size, &type) != 0 || type != 1) {
+        file_close(f);
+        return -1;
+    }
+    file_close(f);
+    strncpy(out, abs, outsz - 1);
+    out[outsz - 1] = 0;
+    return 0;
+}
+
+/* The volume that backs "/" for this boot.  It is set only by
+ * vfs_mount(..., "/") — there is no rootfs embedded in the kernel. */
+static struct fat32_fs *root_fs;
+
+/* Find the longest mounted prefix of path.  Falls back to root_fs.
+ * *rest is the path relative to the chosen filesystem. */
+static struct fat32_fs *mount_resolve(const char *path, const char **rest)
+{
+    struct mount *best = 0;
+    size_t bestlen = 0;
+
+    *rest = path;
+    for (int i = 0; i < MOUNT_MAX; i++) {
+        if (!mounts[i].used)
+            continue;
+        size_t len = strlen(mounts[i].path);
+        if (len == 1 && mounts[i].path[0] == '/')
+            continue;               /* the root mount is root_fs itself */
+        if (strncmp(path, mounts[i].path, len) == 0 &&
+            (path[len] == '\0' || path[len] == '/')) {
+            if (len > bestlen) {
+                best = &mounts[i];
+                bestlen = len;
+            }
+        }
+    }
+    if (best) {
+        *rest = path + bestlen;
+        if (**rest == '\0')
+            *rest = "/";
+        return &best->fs;
+    }
+    return root_fs;
+}
+
+int vfs_mount(const char *source, const char *target)
+{
+    struct mount *m = 0;
+    int is_root;
+
+    if (!source || !target || target[0] != '/')
+        return -1;
+    is_root = strcmp(target, "/") == 0;
+    for (int i = 0; i < MOUNT_MAX; i++) {
+        if (mounts[i].used && strcmp(mounts[i].path, target) == 0)
+            return -1;
+        if (!mounts[i].used && !m)
+            m = &mounts[i];
+    }
+    if (!m)
+        return -1;
+    if (strcmp(source, "/dev/vda") != 0 || !vda_active())
+        return -1;
+    if (vda_capacity() > 0xffffffffULL)
+        return -1;
+    if (fat32_mount(&m->fs, 0, (uint32_t)vda_capacity(),
+                    vda_read_at, vda_write_at, 1) != 0)
+        return -1;
+    strncpy(m->path, target, sizeof(m->path) - 1);
+    m->path[sizeof(m->path) - 1] = 0;
+    m->used = 1;
+    if (is_root)
+        root_fs = &m->fs;   /* switch the whole VFS root to this volume */
+    return 0;
+}
 
 static void pipe_init(void)
 {
@@ -47,6 +234,8 @@ void file_init(void)
     pipe_init();
     for (int i = 0; i < FILE_TABLE_SIZE; i++)
         ftable[i].type = FD_NONE;
+    for (int i = 0; i < MOUNT_MAX; i++)
+        mounts[i].used = 0;
 
     /* Permanent console descriptors 0/1/2. */
     ftable[0].type = FD_CONSOLE;
@@ -196,6 +385,8 @@ void file_close(struct file *f)
             f->type = FD_NONE;
         }
     } else if (f->ref > 0 && --f->ref == 0) {
+        if (f->type == FD_FAT)
+            fat32_sync_entry(&f->fat);
         f->type = FD_NONE;
     }
     spin_unlock_irqrestore(&file_lock, flags);
@@ -203,13 +394,31 @@ void file_close(struct file *f)
 
 struct file *file_open(const char *path, int flags)
 {
-    struct file *dev = dev_open(path, flags);
+    char abspath[128];
+    const char *rpath = path;
+    struct proc *p = myproc();
+
+    if (path && path[0] != '/' && p) {
+        if (path_absolutize(p->cwd, path, abspath, sizeof(abspath)) != 0)
+            return 0;
+        rpath = abspath;
+    }
+
+    struct file *dev = dev_open(rpath, flags);
     if (dev)
         return dev;
 
+    const char *rest;
+    struct fat32_fs *fs = mount_resolve(rpath, &rest);
     struct fat32_file fat;
-    if (fat32_open(path, &fat) != 0)
+    if (fat32_open_fs(fs, rest, &fat) != 0) {
+        if (!(flags & O_CREAT))
+            return 0;
+        if (fat32_create_fs(fs, rest, &fat) != 0)
+            return 0;
+    } else if ((flags & O_CREAT) && (flags & 0x0800)) {  /* O_EXCL */
         return 0;
+    }
 
     struct file *f = file_alloc();
     if (!f)
@@ -217,8 +426,10 @@ struct file *file_open(const char *path, int flags)
     f->type = FD_FAT;
     f->fat = fat;
     f->offset = 0;
-    f->readable = 1;
+    f->readable = (flags & O_WRONLY) == 0;
     f->writable = (flags & (O_WRONLY | O_RDWR)) != 0;
+    if ((flags & O_TRUNC) && f->writable && !f->fat.is_dir)
+        fat32_truncate(&f->fat, 0);
     return f;
 }
 
@@ -330,7 +541,15 @@ int file_write(struct file *f, const void *src, size_t n)
         f->offset += (uint32_t)n;
         return (int)n;
     }
-    return -1;   /* FAT32 RAM disk is mounted read-only in this phase */
+    if (f->type == FD_FAT) {
+        int wrote = fat32_write(&f->fat, src, f->offset, n);
+        if (wrote > 0) {
+            f->offset += (uint32_t)wrote;
+            fat32_sync_entry(&f->fat);
+        }
+        return wrote;
+    }
+    return -1;   /* unknown write target */
 }
 
 int file_lseek(struct file *f, int64_t off, int whence)
@@ -452,15 +671,35 @@ int file_readdir(struct file *f, uint32_t index, struct qvos_dirent *de)
             return 0;
         }
 
-        /* The devfs is virtual and has no FAT dirent: append one synthetic
-         * "dev" directory entry after the real root entries. */
-        if (f->fat.start_cluster == fat_fs.root_cluster &&
-            index == fat_dir_entry_count(&f->fat)) {
-            de->d_ino = 0x00de0000;
-            de->d_type = 1;
-            de->d_namlen = 3;
-            memcpy(de->d_name, "dev", 4);
-            return 0;
+        /* The devfs and mounted volumes are virtual and have no FAT
+         * dirents: append synthetic entries after the real root entries. */
+        if (f->fat.fs == root_fs && f->fat.start_cluster == root_fs->root_cluster) {
+            uint32_t base = fat_dir_entry_count(&f->fat);
+            uint32_t idx = index - base;
+            if (idx == 0) {
+                de->d_ino = 0x00de0000;
+                de->d_type = 1;
+                de->d_namlen = 3;
+                memcpy(de->d_name, "dev", 4);
+                return 0;
+            }
+            idx--;
+            int mcount = 0;
+            for (int i = 0; i < MOUNT_MAX; i++) {
+                if (!mounts[i].used || strcmp(mounts[i].path, "/") == 0)
+                    continue;
+                if (mcount == (int)idx) {
+                    const char *base_name = mount_basename(mounts[i].path);
+                    size_t n = strlen(base_name);
+                    de->d_ino = 0x00de0000 + i + 1;
+                    de->d_type = 1;
+                    de->d_namlen = (uint32_t)n;
+                    memcpy(de->d_name, base_name, n);
+                    de->d_name[n] = 0;
+                    return 0;
+                }
+                mcount++;
+            }
         }
         return -1;
     }

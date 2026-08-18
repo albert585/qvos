@@ -40,6 +40,15 @@ int getdents(int fd, struct qvos_dirent *ents, int max)
 { return (int)syscall6(SYS_getdents, fd, (long)ents, max, 0, 0, 0); }
 int reboot(int how)     { return (int)syscall6(SYS_reboot,how,0,0,0,0,0); }
 int poweroff(void)      { return reboot(0x4321fedc); }
+int mount(const char *source, const char *target)
+{ return (int)syscall6(SYS_mount,(long)source,(long)target,0,0,0,0); }
+int chdir(const char *path)
+{ return (int)syscall6(SYS_chdir,(long)path,0,0,0,0,0); }
+char *getcwd(char *buf, size_t size)
+{
+    long r = syscall6(SYS_getcwd,(long)buf,(long)size,0,0,0,0);
+    return r < 0 ? 0 : buf;
+}
 int fstat(int fd, struct qvos_stat *st) { return (int)syscall6(SYS_fstat,fd,(long)st,0,0,0,0); }
 void *sbrk(intptr_t inc){ return (void *)syscall6(SYS_sbrk,inc,0,0,0,0,0); }
 

@@ -1,7 +1,14 @@
 # qvos
 > This is an AI project.
+> [中文版 README](./README.zh.md)
+
 A small S-mode kernel + POSIX-subset userspace for a dual-core RV64IMAFCV
 platform, brought up and regression-tested on QEMU `riscv64 virt`.
+
+The kernel image carries **no root filesystem**. `/` is a persistent FAT32
+volume on the virtio-blk disk (`build/vdisk.img`), mounted at boot like a
+Linux `root=/dev/vda` system. Kernel and rootfs are built and versioned
+independently.
 
 ## What is implemented
 - OpenSBI `fw_dynamic` → kernel entry in S-mode (boot hart = whichever hart OpenSBI chooses)
@@ -12,40 +19,58 @@ platform, brought up and regression-tested on QEMU `riscv64 virt`.
 - Sv39 paging: kernel RX/RW split, user U/RWX pages, `sfence.vma`, user/kernel isolation
 - DRAM free-list page allocator + first-fit `kmalloc/kfree`
 - Processes: fork/exec/wait/exit/yield/sleep, pipe, per-process kernel stacks and `swtch`
-- FAT32 RAM virtual disk (16 MiB, mtools-built), BPB/FAT/cluster-chain/directory parser
-- VFS-lite: console files, FAT files, pipes; open/read/write/close/lseek/fstat/dup
-- ELF64 RISC-V loader with correct segment permissions and initial argv stack
-- Userspace CRT + libc subset: printf/malloc/string/syscall wrappers
+- **Decoupled rootfs**: FAT32 on persistent `build/vdisk.img` (16 MiB,
+  mtools-provisioned once), BPB/FAT/cluster-chain/directory parser with
+  read/write/create/truncate; kernel.elf is ~530 KiB and contains no disk image
+- VFS-lite: console files, FAT files, pipes, devfs; open/read/write/close/
+  lseek/fstat/dup/getdents; mount table with `mount("/dev/vda", target)`
+  syscall; per-process `cwd` with `chdir`/`getcwd` and relative-path support
+- ELF64 RISC-V loader with correct segment permissions and initial argv stack;
+  exec goes through the VFS, so relative paths and mounted volumes both work
+- Userspace CRT + libc subset (printf/malloc/string/syscall wrappers), plus
+  picolibc for pico-linked programs
 - `/bin/init` → `/bin/ostest` (all PASS) → `/bin/sh` small shell
-- virtio-mmio GPU: 32bpp framebuffer, `fb_init/fb_put_pixel/fb_fill/fb_flush`, on-screen console
-- Userspace framebuffer: `fbmap/fbinfo/fbflush/fbtext/fbclear` syscalls, shared U-mode
-  mapping of the GPU backing store, `/bin/fbdemo` animation, `fb` shell builtin
+  (`help echo cat hd ostest fb vda mount cd pwd panic poweroff exit`)
+- virtio-mmio GPU: 32bpp framebuffer, `fb_init/fb_put_pixel/fb_fill/fb_flush`,
+  on-screen console
+- Userspace framebuffer: `fbmap/fbinfo/fbflush/fbtext/fbclear` syscalls, shared
+  U-mode mapping of the GPU backing store, `/bin/fbdemo` animation, `fb` builtin
 - Devfs-lite: `/dev/fb0` raw framebuffer device (open/read/write/lseek/fstat),
-  plus `/dev/null`, `/dev/zero`, `/dev/mouse`, `/dev/kbd`
-- virtio-blk storage: 16 MiB raw `vdisk.img`, sector read/write via virtqueue,
-  exposed as the `/dev/vda` block device with persistent host backing
+  plus `/dev/null`, `/dev/zero`, `/dev/mouse`, `/dev/kbd`, `/dev/vda`
+- virtio-blk storage: 16 MiB raw `vdisk.img` via virtqueue; both the boot
+  rootfs and the `/dev/vda` raw block device with persistent host backing
 - virtio-input: QEMU `virtio-tablet-device` + `virtio-keyboard-device`, polled
   eventq drivers, `/dev/mouse` and `/dev/kbd` event streams
   (`/bin/mtest` dumps mouse events; `/bin/term` is a framebuffer terminal)
 - Directories: `SYS_getdents` + `/bin/ls` list FAT32 directories and the devfs
-  `/dev` directory; execve now preserves `argc/argv` for spawned programs
+  `/dev` directory; execve preserves `argc/argv` for spawned programs
 - LVGL v9.4 ported to userspace: full-screen XRGB8888 display driver over the
   virtio-gpu framebuffer, built-in heap/string shims, `/bin/lvdemo` animated UI
   with a working mouse pointer (click the OK button to exit)
-- toybox v0.8.13 subset ported to qvos libc: `/bin/toybox` multiplexer runs
-  `echo cat ls pwd true false yes head tail sleep uname`; shell falls back to
-  it for any command that has no real `/bin/<name>` file
+- toybox v0.8.13 subset linked against picolibc: `/bin/toybox` multiplexer
+  runs `echo cat cp ls pwd touch true false yes head tail sleep uname`; the
+  shell falls back to it for any command that has no real `/bin/<name>` file
 - Kernel panic: red screen + UART fallback shell (`help/reboot/poweroff/halt/panic`)
 - Power management: `qvos$ poweroff` / `fallback> poweroff` via SBI SRST shutdown
 
 ## Build & run
 Requirements: clang (with RISC-V target), ld.lld, llvm-objcopy, qemu-system-riscv64,
-mtools, make.
+mtools, make, meson, ninja.
 
-    make          # builds kernel + user programs + FAT32 image
-    make run      # boots with 2 harts, OpenSBI, virtio-gpu (headless serial)
-    make run-gui  # GTK window shows the framebuffer; type in the terminal
-    make run-vnc  # headless; connect a VNC viewer to 127.0.0.1:5900+$(VNC_PORT)
+    make               # builds kernel.elf + user programs (no rootfs inside the kernel)
+    make run           # creates vdisk.img if missing, then boots with 2 harts
+    make run-gui       # GTK window shows the framebuffer; type in the terminal
+    make run-vnc       # headless; connect a VNC viewer to 127.0.0.1:5900+$(VNC_PORT)
+    make rootfs-reset  # delete vdisk.img; next make run re-provisions a clean rootfs
+
+Kernel and rootfs are decoupled:
+
+- `build/kernel.elf` is a ~530 KiB pure kernel.
+- `build/vdisk.img` is a 16 MiB FAT32 rootfs created once. Later builds never
+  overwrite it, so files you create inside qvos survive rebuilds.
+- At boot the kernel mounts `/dev/vda` on `/`; if the disk is not a usable
+  FAT32 rootfs it panics with
+  `VFS: unable to mount root fs on /dev/vda`.
 
 Interactive shell test:
 
@@ -55,15 +80,35 @@ Panic / fallback shell test:
 
     { sleep 3; printf 'panic\nhelp\nhalt\n'; sleep 1; } | make run
 
-## Directories and ls
+## Root filesystem, mount and cwd
 
-    qvos$ ls             # BIN/
-    qvos$ ls /bin        # INIT OSTEST SH FBDEMO LS ...
-    qvos$ ls /dev        # fb0 vda null zero
+The boot disk is a normal FAT32 image on the host, so it can be managed with
+mtools while qvos is not running:
 
-`SYS_getdents` fills fixed-size `struct qvos_dirent` records (`d_ino/d_type/
-d_namlen/d_name`); `file_readdir()` enumerates FAT32 directory entries or the
-virtual `/dev` directory behind the same VFS interface.
+    mdir -i build/vdisk.img ::
+    mcopy -i build/vdisk.img /host/path/file ::/file
+
+Inside qvos:
+
+    qvos$ ls                  # lists the current directory
+    qvos$ ls /bin
+    qvos$ mount /dev/vda /mnt # mount an extra volume (the root disk itself
+                              # can be mounted again under /mnt)
+    qvos$ cd /mnt
+    qvos$ pwd
+    qvos$ ls
+    qvos$ cat file.txt
+    qvos$ cd ..
+    qvos$ cd /                # no argument: go to /
+
+Relative paths are resolved by the kernel against the process `cwd`
+(`SYS_chdir` / `SYS_getcwd`, syscalls 31/32), so builtins, `/bin/ls`, toybox
+applets and exec all share the same current directory. `cwd` is inherited
+across `fork` and preserved across `execve`, like POSIX.
+
+Known limitation: the FAT32 driver currently skips LFN (long filename)
+entries, so mtools long names are displayed through their uppercase 8.3
+alias (for example `hello.txt` shows as `HELLO.TXT`).
 
 ## Framebuffer from userspace
 The virtio-gpu backing store is mapped read/write into U-mode (fixed VA
@@ -100,13 +145,13 @@ auto-flush, `lseek` moves the offset and `fstat` reports the framebuffer size:
 
 `/dev/null` discards writes and `/dev/zero` reads as infinite zero bytes.
 `/dev/mouse` returns fixed-size `struct qvos_input_event` records
-(`EV_ABS ABS_X/ABS_Y`, `EV_KEY BTN_LEFT`, `EV_SYN`):
+(`EV_ABS ABS_X/ABS_Y`, `EV_KEY BTN_LEFT`, `EV_SYN`).
 
 ## virtio-blk storage
-A raw 16 MiB virtual disk (`build/vdisk.img`, auto-created, persisted on the
-host) is attached as the second virtio-mmio device.  The kernel scans the
-transport window for device id 2, drives it through a polled virtqueue, and
-exposes it as the raw block device `/dev/vda`:
+`build/vdisk.img` is a persistent raw 16 MiB image on the host. The kernel
+scans the virtio-mmio transport window for device id 2, drives it through a
+polled virtqueue, mounts its FAT32 filesystem on `/` at boot and also exposes
+it as the raw block device `/dev/vda`:
 
     qvos$ vda info                 # vda: size=16777216 mode=3
     qvos$ vda write 0x1000 deadbeef
@@ -116,7 +161,7 @@ exposes it as the raw block device `/dev/vda`:
 C API (normal file syscalls, no special syscall needed):
 
     int fd = open("/dev/vda", 2);            /* O_RDWR */
-    lseek(fd, off, 0);                       /* SEEK_SET, sector units bytes */
+    lseek(fd, off, 0);                       /* SEEK_SET, byte offset */
     write(fd, buf, n);                       /* raw bytes hit the host image */
     read(fd, back, n);                       /* raw bytes back */
     close(fd);
@@ -152,21 +197,23 @@ mirrored on the UART.
 ## Toybox subset
 
     qvos$ toybox            # toybox multiplexer
-    qvos$ pwd               # /   (falls back to /bin/toybox)
+    qvos$ pwd               # builtin now; toybox pwd also works
     qvos$ uname             # qvos
     qvos$ toybox ls /dev    # fb0 kbd mouse null vda zero
 
-The vendored toybox v0.8.13 builds against a freestanding POSIX shim
-(`third_party/toybox/qvos_shim.h`, `lib/qvos_shim.c`) over the qvos libc.
-Only the read-only-safe applet set is enabled: `echo cat ls pwd true false
-yes head tail sleep uname`.  File-writing applets are intentionally absent
-because qvos's FAT32 is still read-only.
+The vendored toybox v0.8.13 builds against picolibc. `user/picostubs.c` is the
+qvos syscall glue for picolibc, and
+`third_party/toybox/qvos_include/pico_compat.h` +
+`third_party/toybox/lib/qvos_pico_shim.c` cover the toybox-isms picolibc does
+not provide. Enabled applets: `echo cat cp ls pwd touch true false yes head
+tail sleep uname`. `cp` and `touch` work because the FAT32 driver now writes
+files and allocates clusters.
 
 ## Source map
     arch/riscv64/    entry.S, trap.S (uservec/userret trampoline), swtch.S, csr/atomic/trapframe
     kernel/          pmm, vm, proc/scheduler, trap, syscall, fat32, file, elf, uart/klog,
-                     framebuffer, virtioblk, virtioinput, virtiokbd, panic, ramdisk
-    user/            crt0.S, libc, init.c, ostest.c, sh.c, fbdemo.c, ls.c, argtest.c,
-                     lvdemo.c, mousetest.c, term.c, lv_conf.h
-    third_party/     lvgl v9.4 sources + lv_conf shim, toybox v0.8.13 subset + qvos shim
+                     framebuffer, virtioblk, virtioinput, virtiokbd, rtc, panic
+    user/            crt0.S, crt0-pico.S, libc, picostubs, init.c, ostest.c, sh.c,
+                     fbdemo.c, ls.c, argtest.c, lvdemo.c, mousetest.c, term.c, lv_conf.h
+    third_party/     picolibc, lvgl v9.4 sources + lv_conf shim, toybox v0.8.13 subset + pico shim
     doc/             architecture plan + bring-up log

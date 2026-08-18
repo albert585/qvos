@@ -31,6 +31,9 @@
 #define SYS_fbflush     27   /* transfer + flush the 2D resource    */
 #define SYS_fbtext      28   /* draw text with the kernel fb console */
 #define SYS_fbclear     29   /* clear screen + reset text cursor    */
+#define SYS_mount       30   /* mount a block device on a directory */
+#define SYS_chdir       31   /* change current working directory */
+#define SYS_getcwd      32   /* copy current working directory to user */
 
 /* Userspace/kernel ABI for SYS_fbinfo. */
 struct qvos_fb_info {
@@ -57,6 +60,20 @@ struct qvos_input_event {
     uint16_t type;       /* 0 EV_SYN, 1 EV_KEY, 2 EV_REL, 3 EV_ABS */
     uint16_t code;       /* e.g. ABS_X/ABS_Y/BTN_LEFT */
     uint32_t value;
+};
+
+/* SYS_gettimeofday (Unix epoch time from the goldfish RTC). */
+struct qvos_timeval {
+    uint64_t tv_sec;
+    uint64_t tv_usec;
+};
+
+/* SYS_times (qvos has no per-process CPU accounting; all zeros). */
+struct qvos_tms {
+    uint64_t tms_utime;
+    uint64_t tms_stime;
+    uint64_t tms_cutime;
+    uint64_t tms_cstime;
 };
 
 #endif

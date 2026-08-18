@@ -25,6 +25,12 @@ struct tm;
 char *strptime(const char *, const char *, struct tm *);
 int wcwidth(wchar_t);
 
+/* toybox cp.c references the *at-less xattr family unconditionally;
+ * picolibc has no <sys/xattr.h>. */
+ssize_t xattr_flist(int, char *, size_t);
+ssize_t xattr_fget(int, const char *, void *, size_t);
+ssize_t xattr_fset(int, const char *, const void *, size_t, int);
+
 /* picolibc termios is trimmed; declare the classic helpers toybox uses. */
 typedef unsigned int speed_t;
 struct termios;
@@ -38,6 +44,14 @@ void cfmakeraw(struct termios *);
 #endif
 #ifndef ECHOKE
 #define ECHOKE  0x0800
+#endif
+
+/* picolibc omits the utimensat special values. */
+#ifndef UTIME_NOW
+#define UTIME_NOW  ((1L << 30) - 1L)
+#endif
+#ifndef UTIME_OMIT
+#define UTIME_OMIT ((1L << 30) - 2L)
 #endif
 
 /* picolibc paths.h has /bin/sh but no default PATH. */

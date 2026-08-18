@@ -44,6 +44,7 @@ struct proc {
     char   name[16];
 
     void  *ofile[NOFILE];        /* struct file*, filled in Stage 6 */
+    char   cwd[128];             /* per-process current working directory */
 };
 
 extern struct proc proc_table[NPROC];

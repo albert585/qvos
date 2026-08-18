@@ -18,6 +18,7 @@
 #include <kernel/proc.h>
 #include <kernel/smp.h>
 #include <kernel/spinlock.h>
+#include <kernel/string.h>
 #include <kernel/vm.h>
 #include <csr.h>
 
@@ -149,6 +150,8 @@ int allocproc(void)
         ((uint64_t *)&p->ctx.s0)[i] = 0;
     for (int i = 0; i < NOFILE; i++)
         p->ofile[i] = 0;
+    p->cwd[0] = '/';
+    p->cwd[1] = 0;
     p->ofile[0] = file_console(0);
     p->ofile[1] = file_console(1);
     p->ofile[2] = file_console(2);
@@ -400,6 +403,8 @@ int proc_fork(void)
     child->ppid = parent->pid;
     child->parent = parent;
     child->fresh = 1;
+    strncpy(child->cwd, parent->cwd, sizeof(child->cwd) - 1);
+    child->cwd[sizeof(child->cwd) - 1] = 0;
     for (int i = 0; i < NOFILE; i++) {
         child->ofile[i] = parent->ofile[i];
         if (child->ofile[i])

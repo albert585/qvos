@@ -6,6 +6,7 @@
 #include <kernel/klog.h>
 #include <kernel/panic.h>
 #include <kernel/proc.h>
+#include <kernel/rtc.h>
 #include <kernel/sbi.h>
 #include <kernel/string.h>
 #include <kernel/syscall.h>
@@ -151,6 +152,34 @@ static long sys_fstat(struct trapframe *tf)
         return -1;
     for (size_t i = 0; i < sizeof(st); i++)
         ((volatile uint8_t *)pa)[i] = ((uint8_t *)&st)[i];
+    return 0;
+}
+
+static long sys_gettimeofday(struct trapframe *tf)
+{
+    uint64_t uva = arg(tf, 0);
+    uint64_t ns = rtc_unix_ns();
+    struct qvos_timeval tv;
+
+    if (!uva)
+        return 0;
+    tv.tv_sec = ns / 1000000000ULL;
+    tv.tv_usec = (ns % 1000000000ULL) / 1000ULL;
+    if (copyout(myproc()->pg, &tv, uva, sizeof(tv)) != 0)
+        return -1;
+    return 0;
+}
+
+static long sys_times(struct trapframe *tf)
+{
+    uint64_t uva = arg(tf, 0);
+    struct qvos_tms tms;
+
+    if (!uva)
+        return 0;
+    tms.tms_utime = tms.tms_stime = tms.tms_cutime = tms.tms_cstime = 0;
+    if (copyout(myproc()->pg, &tms, uva, sizeof(tms)) != 0)
+        return -1;
     return 0;
 }
 
@@ -345,6 +374,48 @@ static long sys_reboot(struct trapframe *tf)
     return -1;
 }
 
+static long sys_mount(struct trapframe *tf)
+{
+    char source[128], target[128];
+
+    if (copyinstr(myproc()->pg, source, arg(tf, 0), sizeof(source)) != 0)
+        return -1;
+    if (copyinstr(myproc()->pg, target, arg(tf, 1), sizeof(target)) != 0)
+        return -1;
+    return (long)vfs_mount(source, target);
+}
+
+static long sys_chdir(struct trapframe *tf)
+{
+    struct proc *p = myproc();
+    char path[128], abs[128];
+
+    if (copyinstr(p->pg, path, arg(tf, 0), sizeof(path)) != 0)
+        return -1;
+    if (vfs_chdir(path, abs, sizeof(abs)) != 0)
+        return -1;
+    strncpy(p->cwd, abs, sizeof(p->cwd) - 1);
+    p->cwd[sizeof(p->cwd) - 1] = 0;
+    return 0;
+}
+
+static long sys_getcwd(struct trapframe *tf)
+{
+    struct proc *p = myproc();
+    uint64_t uva = arg(tf, 0);
+    size_t sz = (size_t)arg(tf, 1);
+    size_t len;
+
+    if (!p || !uva || sz == 0)
+        return -1;
+    len = strlen(p->cwd);
+    if (len + 1 > sz)
+        return -1;
+    if (copyout(p->pg, p->cwd, uva, len + 1) != 0)
+        return -1;
+    return (long)len;
+}
+
 /* ---- virtio-gpu framebuffer syscalls ---- */
 
 static long sys_fbmap(void)
@@ -456,7 +527,12 @@ void syscall(struct trapframe *tf)
     case SYS_dup:     ret = sys_dup(tf); break;
     case SYS_pipe:    ret = sys_pipe(tf); break;
     case SYS_getdents: ret = sys_getdents(tf); break;
+    case SYS_gettimeofday: ret = sys_gettimeofday(tf); break;
+    case SYS_times:   ret = sys_times(tf); break;
     case SYS_reboot:  ret = sys_reboot(tf); break;
+    case SYS_mount:   ret = sys_mount(tf); break;
+    case SYS_chdir:   ret = sys_chdir(tf); break;
+    case SYS_getcwd:  ret = sys_getcwd(tf); break;
     case SYS_fbmap:   ret = sys_fbmap(); break;
     case SYS_fbinfo:  ret = sys_fbinfo(tf); break;
     case SYS_fbflush: ret = sys_fbflush(); break;

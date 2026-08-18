@@ -8,6 +8,7 @@
  */
 #include <kernel/elf.h>
 #include <kernel/fat32.h>
+#include <kernel/file.h>
 #include <kernel/kalloc.h>
 #include <kernel/klog.h>
 #include <kernel/pmm.h>
@@ -122,21 +123,29 @@ int proc_exec(const char *path, char *const argv[])
             argc++;
     }
 
-    /* Read the executable out of the FAT32 ramdisk. */
-    struct fat32_file f;
-    if (fat32_open(path, &f) != 0) {
+    /* Read the executable through the VFS so relative paths, mount points
+     * and the FAT32 root all work. */
+    struct file *fp = file_open(path, 0);   /* O_RDONLY */
+    if (!fp || fp->type != FD_FAT || fp->fat.is_dir) {
+        if (fp)
+            file_close(fp);
         klog_puts("[qvos] exec: not found: ");
         klog_puts(path);
         klog_puts("\n");
         return -1;
     }
-    uint8_t *image = kmalloc(f.size ? f.size : 1);
-    if (!image)
+    uint32_t fsize = fp->fat.size;
+    uint8_t *image = kmalloc(fsize ? fsize : 1);
+    if (!image) {
+        file_close(fp);
         return -1;
-    if (fat32_read(&f, image, 0, f.size) != (int)f.size) {
+    }
+    if (file_read(fp, image, fsize) != (int)fsize) {
+        file_close(fp);
         kfree(image);
         return -1;
     }
+    file_close(fp);
 
     pagetable_t newpg = vm_create();
     if (!newpg) {
@@ -146,7 +155,7 @@ int proc_exec(const char *path, char *const argv[])
     uvm_map_common(newpg, p->tf);
 
     uint64_t brk = 0;
-    uint64_t entry = elf_load(newpg, image, f.size, &brk);
+    uint64_t entry = elf_load(newpg, image, fsize, &brk);
     kfree(image);
     if (!entry) {
         vm_free_user_pages(newpg);

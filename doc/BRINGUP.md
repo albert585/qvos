@@ -70,9 +70,28 @@ Findings:
 3. Panic paints red, mirrors the trap context to UART/fb, then enters
    `fallback> help/reboot/halt/panic`.
 
+## Stage 9 — virtio-blk / virtio-input / LVGL / toybox
+Result: **PASS** — `/dev/vda` raw block device with persistent host backing;
+`/dev/mouse` + `/dev/kbd` event streams; `lvdemo` animated UI; toybox subset
+multiplexer with shell fallback.
+
+## Stage 10 — multi-volume FAT32 + mount + cwd
+Result: **PASS** — FAT32 driver parameterized over block backends
+(`fat32_mount`), VFS mount table with longest-prefix routing, and
+`SYS_mount/SYS_chdir/SYS_getcwd`. `mount /dev/vda /mnt`, `cd /mnt`, `pwd`,
+relative-path `ls`/`cat` all work; exec goes through the VFS.
+
+## Stage 11 — decoupled rootfs
+Result: **PASS** — the 16 MiB FAT32 image was removed from the kernel
+(`kernel/ramdisk.S` deleted). `build/kernel.elf` is ~530 KiB and carries no
+rootfs; boot mounts `/dev/vda` as `/` and panics with
+`VFS: unable to mount root fs on /dev/vda` when the disk is not a usable
+FAT32 volume. `build/vdisk.img` is provisioned once by make and persists
+across rebuilds (`make rootfs-reset` to reset).
+
 ## Final regression
 Command: boot 2 harts with GPU, run `help`, `echo qvos shell ok`, `ostest`,
 `panic`, fallback `help`, `halt`.
 
-Observed: `STAGE8_OK`, `ostest RESULT: PASS (0 failures)`, shell echo,
+Observed: `STAGE10_OK`, `ostest RESULT: PASS (0 failures)`, shell echo,
 fallback shell prompt, `halted`.

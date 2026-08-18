@@ -21,7 +21,7 @@
 1. OpenSBI (M-mode) → `_start` (S-mode, hart0/hart1).
 2. hart0: zero .bss, init console, traps, mmu, allocator, fs, scheduler.
 3. hart0 uses SBI HSM `sbi_hart_start(hart1, secondary_entry, arg)`; hart1 sets its per-hart stack/trap CSR and joins scheduler via AMO spinlock.
-4. Kernel starts `/bin/init` (ELF64 from FAT32 ramdisk). `/bin/init` runs `/bin/ostest`, then `/bin/sh` (fallback shell).
+4. Kernel mounts the persistent FAT32 on `/dev/vda` as `/` (no rootfs is embedded in the kernel) and starts `/bin/init` through the VFS. `/bin/init` runs `/bin/ostest`, then `/bin/sh`.
 
 ## 4. Trap model
 - `stvec = trap_vector` (direct; all traps share one entry).
@@ -46,9 +46,17 @@
 - fork copies COW-later (v1: deep-copy user pages), execve replaces image, waitpid reaps zombies, kill/exit notify parent.
 
 ## 8. Filesystem
-- FAT32 image built with mtools into a 16 MiB `uint8_t ramdisk[]` linked into the kernel (stage 6) OR appended binary loaded by QEMU (`-initrd` not needed; kernel-embedded keeps boot simple).
-- Parsed on demand: BPB, FAT, cluster chains, root directory. RAM disk is read-mostly; open/read/close/seek + directory enumeration for VFS; write support limited to new files in stage review.
-- `/bin/init`, `/bin/ostest`, `/bin/sh` on the image.
+- Kernel and rootfs are decoupled: `kernel.elf` contains no disk image.
+- The root volume is a 16 MiB FAT32 image (`build/vdisk.img`) provisioned by
+  mtools when first created.  `vfs_mount("/dev/vda", "/")` makes it `/`.
+- FAT32 driver is backend-agnostic (`fat32_mount(fs, dev, total_bytes,
+  read_at, write_at, writable)`); virtio-blk is the boot backend.
+- Parsed on demand: BPB, FAT, cluster chains, root directory. open/read/
+  write/create/truncate/close/seek + directory enumeration for VFS.
+- VFS mount table: longest-prefix match against mount points; devfs routes
+  `/dev/*` first; every process has `cwd` and relative paths are resolved in
+  `file_open()`.
+- `/bin/init`, `/bin/ostest`, `/bin/sh` live on the persistent disk.
 
 ## 9. ELF loader
 - Validate ELF64 EM_RISCV, load PT_LOAD segments into fresh user pagetable, zero BSS, set user SP/argc/argv, `sret` to entry (`_start` of CRT which calls `main`).
@@ -56,7 +64,9 @@
 ## 10. Userspace
 - Freestanding libc subset in `user/`: `crt0.S`, syscall wrappers (ecall ABI: a7=sysno), printf/malloc-lite (sbrk), string functions.
 - `/bin/ostest`: fork/exit/wait, pipe, open/read files, mmap-less malloc, float math, RVV dot-product, signals-lite.
-- `/bin/sh`: builtin echo/cat/help/ps/exit + spawn programs via fork/exec/wait.
+- `/bin/sh`: builtins echo/cat/hd/fb/vda/mount/cd/pwd/ostest/panic/poweroff/
+  exit + spawn programs via fork/exec/wait. Relative program/file paths work
+  through the per-process kernel cwd.
 - `/bin/ls`: `SYS_getdents` directory listing; works on FAT32 directories and
   the virtual `/dev` directory. Successful execve keeps the new image's
   argc/argv instead of overwriting a0 with the syscall return value.
@@ -82,6 +92,9 @@
   partial sectors use read-modify-write; capacity is read from config space.
 - VFS exposes it as `/dev/vda` (`FD_DEVVDA`): open/read/write/lseek/fstat,
   block-device mode in fstat, persistent across reboots via the host file.
+- At boot `vfs_mount("/dev/vda", "/")` makes this volume the root; if it is
+  not a usable FAT32 rootfs the kernel panics
+  `VFS: unable to mount root fs on /dev/vda`.
 
 ## 13. virtio-input mouse/tablet + keyboard
 - Scans for device id 18; QEMU attaches `virtio-keyboard-device` on
@@ -97,12 +110,13 @@
   `/bin/sh` behind a pipe-based user-space pseudo-terminal and renders its
   stdout on the framebuffer.
 
-## 14. Syscall subset (standard tier)
-process: fork, execve, waitpid, exit, getpid, getppid, sbrk, yield, kill, sleep/nanosleep
-fs: open, close, read, write, lseek, fstat, getdents, mkdir, unlink, dup, pipe
-misc: time/times, gettimeofday, brk (no-op beyond sbrk), reboot
+## 14. Syscall subset
+process: fork, execve, waitpid, exit, getpid, getppid, sbrk, yield, nanosleep
+fs: open, close, read, write, lseek, fstat, getdents, dup, pipe,
+    mount, chdir, getcwd
+misc: gettimeofday, times, reboot
 fb: fbmap, fbinfo, fbflush, fbtext, fbclear (shared virtio-gpu framebuffer)
-All are real implementations; no stubs returning ENOSYS in the required set.
+mount/chdir/getcwd back the per-process cwd and the VFS mount table.
 
 ## 15. LVGL v9 port
 - Sources vendored under `third_party/lvgl`, compiled once into a static
@@ -119,16 +133,13 @@ All are real implementations; no stubs returning ENOSYS in the required set.
   `lv_indev_set_cursor()`, so the pointer position is always visible.
 
 ## 16. toybox subset
-- toybox v0.8.13 vendored under `third_party/toybox`; `.config` enables only
-  read-only-safe applets (`echo cat ls pwd true false yes head tail sleep
-  uname`), plus toybox core.
-- `toys.h` is patched to include `qvos_shim.h` instead of the full POSIX
-  header set; `lib/qvos_shim.c` implements the missing libc/POSIX surface
-  (dirent, stat, stdio, env, regex/tty/signal stubs, RISC-V setjmp) on top
-  of qvos syscalls.  qvos `libc.c` gained a full printf family and FILE layer.
-- `lib/dirtree.c` is compiled at -O0: the qvos vector-optimized `memcpy/
-  memset` plus the large shim `struct stat` exposes a stack-layout
-  interaction under -O2; -O0 is the conservative fix.
+- toybox v0.8.13 vendored under `third_party/toybox`; enabled applets:
+  `echo cat cp ls pwd touch true false yes head tail sleep uname`, plus toybox core.
+- Built against picolibc: `user/picostubs.c` is the picolibc OS glue
+  (syscalls, stdio, stat, dirent, cwd), and
+  `third_party/toybox/qvos_include/pico_compat.h` +
+  `third_party/toybox/lib/qvos_pico_shim.c` fill the toybox-isms picolibc
+  omits (dev numbers, sendfile, xnotify, syslog, termios helpers).
 - `/bin/toybox` links as a multiplexer; qvos shell tries `/bin/<name>` first
   and falls back to `/bin/toybox` with the same argv[0].
 - Freestanding shim: `include/inttypes.h` provides the PRI macros LVGL asks

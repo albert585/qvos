@@ -318,6 +318,41 @@ static int cmd_fb(int argc, char **argv)
     return 0;
 }
 
+static int cmd_cd(int argc, char **argv)
+{
+    const char *path = (argc > 1) ? argv[1] : "/";
+    if (chdir(path) != 0) {
+        printf("cd: %s: no such directory\n", path);
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_pwd(int argc, char **argv)
+{
+    char buf[128];
+
+    (void)argc; (void)argv;
+    if (!getcwd(buf, sizeof(buf))) {
+        printf("pwd: failed\n");
+        return 1;
+    }
+    printf("%s\n", buf);
+    return 0;
+}
+
+static int cmd_mount(int argc, char **argv)
+{
+    if (argc < 3) {
+        printf("usage: mount <source> <target>\n");
+        return 1;
+    }
+    int r = mount(argv[1], argv[2]);
+    printf("mount %s -> %s: %s\n", argv[1], argv[2],
+           r == 0 ? "OK" : "FAIL");
+    return r;
+}
+
 static int cmd_vda(int argc, char **argv)
 {
     int fd = open("/dev/vda", 2);   /* O_RDWR */
@@ -454,7 +489,7 @@ int main(void)
         if (strcmp(argv[0], "exit") == 0)
             break;
         if (strcmp(argv[0], "help") == 0) {
-            printf("builtins: help echo cat hd ostest test fb vda panic poweroff exit\n");
+            printf("builtins: help echo cat hd ostest test fb vda mount cd pwd panic poweroff exit\n");
             printf("external: any executable in /bin (try ls or fbdemo)\n");
         } else if (strcmp(argv[0], "echo") == 0) {
             cmd_echo(argc, argv);
@@ -470,6 +505,12 @@ int main(void)
             cmd_fb(argc, argv);
         } else if (strcmp(argv[0], "vda") == 0) {
             cmd_vda(argc, argv);
+        } else if (strcmp(argv[0], "mount") == 0) {
+            cmd_mount(argc, argv);
+        } else if (strcmp(argv[0], "cd") == 0) {
+            cmd_cd(argc, argv);
+        } else if (strcmp(argv[0], "pwd") == 0) {
+            cmd_pwd(argc, argv);
         } else if (strcmp(argv[0], "panic") == 0) {
             printf("triggering kernel panic...\n");
             reboot(0xdeadbeef);

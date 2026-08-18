@@ -29,6 +29,9 @@ int   pipe(int fds[2]);
 int   getdents(int fd, struct qvos_dirent *ents, int max);
 int   reboot(int how);
 int   poweroff(void);
+int   mount(const char *source, const char *target);
+int   chdir(const char *path);
+char *getcwd(char *buf, size_t size);
 
 /* ---- virtio-gpu framebuffer ---- */
 void *fbmap(void);

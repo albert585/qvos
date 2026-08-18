@@ -253,7 +253,7 @@ writev(int fd, const struct iovec *iov, int iovcnt)
     return total;
 }
 
-/* ---- identity / clocks (qvos has no users, no RTC) ------------------ */
+/* ---- identity / clocks (single-user; wall clock from goldfish RTC) --- */
 
 uid_t getuid(void)  { return 0; }
 uid_t geteuid(void) { return 0; }
@@ -263,30 +263,44 @@ gid_t getegid(void) { return 0; }
 int
 gettimeofday(struct timeval *tv, void *tz)
 {
-    if (tv) {
-        tv->tv_sec = 0;
-        tv->tv_usec = 0;
-    }
+    struct qvos_timeval qt;
+
     (void)tz;
+    if (!tv)
+        return 0;
+    if (qsys(SYS_gettimeofday, (long)&qt, 0, 0, 0, 0, 0) < 0)
+        return -1;
+    tv->tv_sec = (time_t)qt.tv_sec;
+    tv->tv_usec = (suseconds_t)qt.tv_usec;
     return 0;
 }
 
 int
 clock_gettime(clockid_t clk, struct timespec *ts)
 {
+    struct qvos_timeval qt;
+
     (void)clk;
-    if (ts) {
-        ts->tv_sec = 0;
-        ts->tv_nsec = 0;
-    }
+    if (!ts)
+        return 0;
+    if (qsys(SYS_gettimeofday, (long)&qt, 0, 0, 0, 0, 0) < 0)
+        return -1;
+    ts->tv_sec = (time_t)qt.tv_sec;
+    ts->tv_nsec = (long)(qt.tv_usec * 1000ULL);
     return 0;
 }
 
 clock_t
 times(struct tms *buf)
 {
-    if (buf)
-        memset(buf, 0, sizeof(*buf));
+    struct qvos_tms qt;
+
+    if (buf && qsys(SYS_times, (long)&qt, 0, 0, 0, 0, 0) == 0) {
+        buf->tms_utime = qt.tms_utime;
+        buf->tms_stime = qt.tms_stime;
+        buf->tms_cutime = qt.tms_cutime;
+        buf->tms_cstime = qt.tms_cstime;
+    }
     return 0;
 }
 
@@ -355,6 +369,7 @@ static void
 fill_stat(struct stat *st, uint64_t size, uint32_t type)
 {
     mode_t mode;
+    struct timeval tv;
 
     memset(st, 0, sizeof(*st));
     /* qvos has no permissions/owners: only the POSIX type bits are real.
@@ -373,6 +388,11 @@ fill_stat(struct stat *st, uint64_t size, uint32_t type)
     st->st_ino = 1;
     st->st_blksize = 512;
     st->st_blocks = (size + 511) / 512;
+
+    gettimeofday(&tv, 0);
+    st->st_atim.tv_sec = st->st_mtim.tv_sec = st->st_ctim.tv_sec = tv.tv_sec;
+    st->st_atim.tv_nsec = st->st_mtim.tv_nsec = st->st_ctim.tv_nsec =
+        (long)(tv.tv_usec * 1000ULL);
 }
 
 int
@@ -432,6 +452,99 @@ openat(int dirfd, const char *path, int flags, ...)
     return r;
 }
 
+int
+utimensat(int dirfd, const char *path, const struct timespec ts[2], int flags)
+{
+    /* qvos cannot store timestamps, but touch() relies on ENOENT to know
+     * that it should create the file. */
+    (void)dirfd; (void)ts; (void)flags;
+    int fd = open(path, 0);
+    if (fd < 0) {
+        errno = ENOENT;
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
+int
+futimens(int fd, const struct timespec ts[2])
+{
+    (void)fd; (void)ts;
+    return 0;
+}
+
+/* ---- *at() calls cp needs; qvos provides only what exists above ------ */
+
+int
+mkdirat(int dirfd, const char *path, mode_t mode)
+{
+    (void)dirfd; (void)path; (void)mode;
+    errno = ENOSYS;
+    return -1;
+}
+
+int
+faccessat(int dirfd, const char *path, int mode, int flags)
+{
+    (void)dirfd; (void)flags;
+    return access(path, mode);
+}
+
+int
+linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath,
+       int flags)
+{
+    (void)olddirfd; (void)oldpath; (void)newdirfd; (void)newpath; (void)flags;
+    errno = ENOSYS;
+    return -1;
+}
+
+int
+symlinkat(const char *target, int dirfd, const char *linkpath)
+{
+    (void)target; (void)dirfd; (void)linkpath;
+    errno = ENOSYS;
+    return -1;
+}
+
+int
+unlinkat(int dirfd, const char *path, int flags)
+{
+    (void)dirfd; (void)path; (void)flags;
+    errno = ENOSYS;
+    return -1;
+}
+
+int
+mknodat(int dirfd, const char *path, mode_t mode, dev_t dev)
+{
+    (void)dirfd; (void)path; (void)mode; (void)dev;
+    errno = ENOSYS;
+    return -1;
+}
+
+int
+fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags)
+{
+    (void)dirfd; (void)path; (void)owner; (void)group; (void)flags;
+    return 0;      /* qvos has no owners */
+}
+
+int
+fchown(int fd, uid_t owner, gid_t group)
+{
+    (void)fd; (void)owner; (void)group;
+    return 0;
+}
+
+int
+fchmod(int fd, mode_t mode)
+{
+    (void)fd; (void)mode;
+    return 0;      /* qvos has no permission bits */
+}
+
 ssize_t
 readlinkat(int dirfd, const char *path, char *buf, size_t size)
 {
@@ -449,22 +562,25 @@ readlink(const char *path, char *buf, size_t size)
 char *
 getcwd(char *buf, size_t size)
 {
+    long r;
+
     if (!buf) {
-        buf = malloc(2);
+        if (size == 0)
+            size = 128;
+        buf = malloc(size);
         if (!buf) { errno = ENOMEM; return 0; }
-        size = 2;
     }
-    if (size < 2) { errno = ERANGE; return 0; }
-    buf[0] = '/';
-    buf[1] = 0;
+    r = qsys(SYS_getcwd, (long)buf, (long)size, 0, 0, 0, 0);
+    if (r < 0) { errno = ERANGE; return 0; }
     return buf;
 }
 
 int
 chdir(const char *path)
 {
-    (void)path;
-    return 0;   /* qvos paths are absolute; chdir is a no-op */
+    long r = qsys(SYS_chdir, (long)path, 0, 0, 0, 0, 0);
+    if (r < 0) { errno = ENOENT; return -1; }
+    return 0;
 }
 
 int
@@ -629,6 +745,14 @@ closedir(DIR *d)
     int r = close(d->fd);
     free(d);
     return r;
+}
+
+int
+mount(const char *source, const char *target)
+{
+    long r = qsys(SYS_mount, (long)source, (long)target, 0, 0, 0, 0);
+    if (r < 0) { errno = EINVAL; return -1; }
+    return (int)r;
 }
 
 /* ---- uname (picolibc has no <sys/utsname.h>) ----------------------- */

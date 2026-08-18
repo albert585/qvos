@@ -1,13 +1,13 @@
-/* Stage 6: FAT32 RAM disk, VFS file table and the ELF64 loader.
- * The kernel mounts / from the embedded 16 MiB FAT32 image and starts
- * /bin/init (an ELF64 RISC-V executable) through the real exec path.
+/* Stage 6: VFS + ELF64 loader.
+ * The kernel carries no root filesystem: "/" is a FAT32 volume mounted
+ * from /dev/vda at boot, and /bin/init is started through the VFS path.
  */
-#include <kernel/fat32.h>
 #include <kernel/file.h>
 #include <kernel/framebuffer.h>
 #include <kernel/klog.h>
 #include <kernel/pmm.h>
 #include <kernel/proc.h>
+#include <kernel/rtc.h>
 #include <kernel/smp.h>
 #include <kernel/virtioblk.h>
 #include <kernel/virtioinput.h>
@@ -30,14 +30,25 @@ __attribute__((noreturn)) void kmain(uint64_t hartid, uint64_t dtb)
     vda_init();
     kbd_init();
     mouse_init();
+    rtc_init();
     proc_init();
     file_init();
 
-    if (fat32_init() != 0) {
-        klog_puts("[qvos] PANIC: cannot mount FAT32 ramdisk\n");
+    /* Root filesystem: the kernel image carries none.  "/" must come from
+     * a FAT32 volume on /dev/vda, just like Linux booting root=/dev/vda. */
+    if (vfs_mount("/dev/vda", "/") != 0) {
+        klog_puts("[qvos] PANIC: VFS: unable to mount root fs on /dev/vda\n");
         for (;;)
             __asm__ volatile("wfi");
     }
+    struct file *probe = file_open("/bin/init", 0);
+    if (!probe) {
+        klog_puts("[qvos] PANIC: root fs has no /bin/init\n");
+        for (;;)
+            __asm__ volatile("wfi");
+    }
+    file_close(probe);
+    klog_puts("[qvos] root: /dev/vda (persistent FAT32)\n");
 
     char *init_argv[] = { "/bin/init", 0 };
     if (proc_spawn("/bin/init", init_argv) < 0) {

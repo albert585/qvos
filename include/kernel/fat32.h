@@ -53,17 +53,11 @@ struct fat32_dirent {
     uint32_t size;
 } __attribute__((packed));
 
-struct fat32_file {
-    uint32_t start_cluster;
-    uint32_t size;
-    int      is_dir;
-};
-
-struct fat32_dir_iter {
-    uint32_t cluster;
-    uint32_t sector;
-    uint32_t index;       /* entry index within sector */
-};
+/* Block-device backend used by a FAT32 volume.  All offsets are byte
+ * offsets from the start of the volume.  read_at/write_at must transfer
+ * exactly n bytes and return 0 on success, -1 on failure. */
+typedef int (*fat32_read_fn)(void *dev, uint32_t offset, void *dst, size_t n);
+typedef int (*fat32_write_fn)(void *dev, uint32_t offset, const void *src, size_t n);
 
 struct fat32_fs {
     uint16_t bytes_per_sector;
@@ -76,16 +70,48 @@ struct fat32_fs {
     uint32_t data_start;     /* first data sector */
     uint32_t root_cluster;
     uint32_t total_sectors;
+    uint32_t total_bytes;    /* backend capacity in bytes */
+
+    void *dev;               /* backend private data, e.g. RAM image pointer */
+    fat32_read_fn read_at;
+    fat32_write_fn write_at;
+    int  writable;
 };
 
-extern struct fat32_fs fat_fs;
+struct fat32_file {
+    struct fat32_fs *fs;     /* volume this file belongs to */
+    uint32_t start_cluster;
+    uint32_t size;
+    int      is_dir;
+    /* Directory entry this file was opened/created through (for updating
+     * size + cluster fields after writes).  dir_cluster==0 for root. */
+    uint32_t dir_cluster;
+    uint32_t dir_sector;
+    uint32_t dir_index;
+};
 
-int  fat32_init(void);
-int  fat32_open(const char *path, struct fat32_file *f);
+struct fat32_dir_iter {
+    uint32_t cluster;
+    uint32_t sector;
+    uint32_t index;       /* entry index within sector */
+};
+
+/* Mount a FAT32 volume from an arbitrary block backend.  The backend is
+ * probed by reading sector 0; on success fs is filled in and ready to use. */
+int  fat32_mount(struct fat32_fs *fs, void *dev, uint32_t total_bytes,
+                 fat32_read_fn read_at, fat32_write_fn write_at, int writable);
+
+int  fat32_open_fs(struct fat32_fs *fs, const char *path, struct fat32_file *f);
+int  fat32_create_fs(struct fat32_fs *fs, const char *path, struct fat32_file *out);
 int  fat32_read(struct fat32_file *f, void *dst, uint32_t offset, size_t n);
-int  fat32_dir_next(struct fat32_dir_iter *it, struct fat32_dirent *de);
-int  fat32_dir_lookup(uint32_t dir_cluster, const char *name,
-                      struct fat32_file *out);
+int  fat32_write(struct fat32_file *f, const void *src, uint32_t offset,
+                 size_t n);
+int  fat32_truncate(struct fat32_file *f, uint32_t new_size);
+int  fat32_sync_entry(struct fat32_file *f);
+int  fat32_dir_next(struct fat32_fs *fs, struct fat32_dir_iter *it,
+                    struct fat32_dirent *de);
+int  fat32_dir_lookup(struct fat32_fs *fs, uint32_t dir_cluster,
+                      const char *name, struct fat32_file *out);
 int  fat32_readdir(struct fat32_file *f, uint32_t index,
                    struct fat32_dirent *de);
 
