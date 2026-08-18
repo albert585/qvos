@@ -1,6 +1,17 @@
-# qvos build system — clang/ld.lld cross toolchain (no GNU RISC-V binutils needed)
+# qvos userspace/rootfs build — the kernel lives in plain-b/.
+#
+# This tree no longer contains kernel sources. It builds the qvos user
+# programs and provisions the persistent FAT32 rootfs (build/vdisk.img).
+# Booting uses the standalone plain-b kernel:
+#
+#   make               # build all user programs + provision vdisk.img
+#   make run           # build plain-b kernel (if needed) and boot QEMU
+#   make run-gui       # GTK window shows the framebuffer
+#   make run-vnc       # headless VNC view
+#   make test          # non-interactive regression boot
+#   make rootfs-reset  # delete vdisk.img (re-provision on next run)
+
 CC      := clang --target=riscv64-unknown-elf
-LD      := ld.lld
 AR      := llvm-ar
 OBJCOPY := llvm-objcopy
 QEMU    := qemu-system-riscv64
@@ -9,17 +20,13 @@ MARCH   := rv64imafdcv_zicsr_zifencei
 MABI    := lp64d
 CMODEL  := medany
 
-WARN    := -Wall -Wextra -Wno-unused-parameter
-CFLAGS  := $(WARN) -O2 -g -march=$(MARCH) -mabi=$(MABI) -mcmodel=$(CMODEL) \
-           -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie \
-           -Iinclude -Ikernel -Iarch/riscv64
-
-LDFLAGS := -m elf64lriscv -T arch/riscv64/kernel.ld -nostdlib --gc-sections \
-           --build-id=none
-
 VNC_PORT ?= 5
 VDISK    := build/vdisk.img
 VDISK_MB ?= 16
+
+# Standalone kernel project.
+PLAINB  := plain-b
+KERNEL  := $(PLAINB)/build/plain-b.elf
 
 QEMU_FLAGS := -machine virt -m 128M -smp 2 -cpu max \
               -bios /usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin \
@@ -29,48 +36,11 @@ QEMU_FLAGS := -machine virt -m 128M -smp 2 -cpu max \
               -device virtio-blk-device,drive=vdisk,bus=virtio-mmio-bus.6 \
               -device virtio-tablet-device,bus=virtio-mmio-bus.5 \
               -device virtio-keyboard-device,bus=virtio-mmio-bus.4 \
+              -audiodev wav,id=audio0,path=/tmp/qvos.wav \
+              -device virtio-sound-device,bus=virtio-mmio-bus.3,audiodev=audio0 \
               -no-reboot
 
-OBJS := build/arch/entry.o \
-        build/arch/swtch.o \
-        build/arch/trap.o \
-        build/kernel/elf.o \
-        build/kernel/fat32.o \
-        build/kernel/file.o \
-        build/kernel/framebuffer.o \
-        build/kernel/kmain.o \
-        build/kernel/kalloc.o \
-        build/kernel/klog.o \
-        build/kernel/libk.o \
-        build/kernel/panic.o \
-        build/kernel/pmm.o \
-        build/kernel/proc.o \
-        build/kernel/rtc.o \
-        build/kernel/sbi.o \
-        build/kernel/smp.o \
-        build/kernel/spinlock.o \
-        build/kernel/stage5_blob.o \
-        build/kernel/syscall.o \
-        build/kernel/trap.o \
-        build/kernel/uart.o \
-        build/kernel/virtioblk.o \
-        build/kernel/virtioinput.o \
-        build/kernel/virtiokbd.o \
-        build/kernel/vm.o
-
-all: build/kernel.elf
-
-build/arch/%.o: arch/riscv64/%.S
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-build/kernel/%.o: kernel/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-build/kernel/stage5_blob.o: kernel/stage5_blob.S build/user/stage5.bin
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+all: build/vdisk.img
 
 # ---- picolibc (cross-compiled once; userspace programs link it for a
 # full C library instead of the hand-rolled user/libc.c subset) ----
@@ -110,13 +80,14 @@ build/user/hello-pico.elf: build/user/crt0-pico.o build/user/picostubs.o \
 	  -Wl,-e,_start -Wl,--build-id=none -o $@ $^
 
 # ---- virtio-blk root disk (persistent FAT32; created once) ----
-# The kernel prefers /dev/vda as "/" when it holds a usable FAT32 rootfs.
-# The image is only (re)created when missing, so files you write from
-# inside qvos survive rebuilds; delete it to re-provision from scratch.
+# The plain-b kernel mounts /dev/vda as "/" at boot. The image is only
+# (re)created when missing, so files written from inside qvos survive
+# rebuilds; delete it to re-provision from scratch.
 USERBINS := build/user/init.elf build/user/ostest.elf build/user/sh.elf \
             build/user/fbdemo.elf build/user/ls.elf build/user/argtest.elf \
             build/user/lvdemo.elf build/user/mtest.elf build/user/term.elf \
-            build/user/toybox.elf build/user/hello-pico.elf build/user/wtest.elf
+            build/user/toybox.elf build/user/hello-pico.elf build/user/wtest.elf \
+            build/user/play.elf
 build/vdisk.img: $(USERBINS)
 	dd if=/dev/zero of=$@ bs=1M count=$(VDISK_MB) status=none
 	mformat -F -i $@ ::
@@ -133,27 +104,20 @@ build/vdisk.img: $(USERBINS)
 	mcopy -i $@ build/user/toybox.elf ::/bin/toybox
 	mcopy -i $@ build/user/hello-pico.elf ::/bin/pico
 	mcopy -i $@ build/user/wtest.elf ::/bin/wtest
+	mcopy -i $@ build/user/play.elf ::/bin/play
 	@echo "[vdisk] provisioned persistent rootfs at $@ (delete to reset)"
 
 .PHONY: rootfs-reset
 rootfs-reset:
 	rm -f build/vdisk.img
 
-build/user/stage5.elf: user/stage5_test.c
-	@mkdir -p $(dir $@)
-	$(CC) -O2 -g -march=$(MARCH) -mabi=$(MABI) -mcmodel=$(CMODEL) \
-	  -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie \
-	  -fuse-ld=lld -Wl,-Ttext=0x40000000 -Wl,-e,_start \
-	  -Wl,--build-id=none -o $@ $<
-
-build/user/stage5.bin: build/user/stage5.elf
-	$(OBJCOPY) -O binary $< $@
-
 # ---- userspace CRT/libc and programs ----
 LVGL_DIR := third_party/lvgl
+# Kernel ABI headers now come from plain-b/include (this tree has no kernel).
 USERCFLAGS := -O2 -g -march=$(MARCH) -mabi=$(MABI) -mcmodel=$(CMODEL) \
               -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie \
-              -Iuser -Iinclude -I$(LVGL_DIR) -DLV_CONF_INCLUDE_SIMPLE
+              -Iuser -Iinclude -I$(PLAINB)/include -I$(LVGL_DIR) \
+              -DLV_CONF_INCLUDE_SIMPLE
 
 build/user/%.o: user/%.c
 	@mkdir -p $(dir $@)
@@ -185,7 +149,8 @@ PICOTOY_CFLAGS := -O2 -g -march=$(MARCH) -mabi=$(MABI) -mcmodel=$(CMODEL) \
                   -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-pie -w \
                   -ffunction-sections -fdata-sections \
                   -I$(PICODIR)/libc/include -Ibuild/picolibc \
-                  -I$(TOYBOX_DIR) -I$(TOYBOX_DIR)/qvos_include -Iinclude
+                  -I$(TOYBOX_DIR) -I$(TOYBOX_DIR)/qvos_include \
+                  -Iinclude -I$(PLAINB)/include
 
 TOYBOX_CORE := main.c lib/lib.c lib/xwrap.c lib/args.c lib/llist.c \
                lib/dirtree.c lib/env.c lib/commas.c lib/utf8.c lib/tty.c
@@ -249,31 +214,38 @@ build/user/term.elf: build/user/term.o $(USERLIBS)
 	$(CC) $(USERCFLAGS) -fuse-ld=lld -Wl,-Ttext=0x40000000 \
 	  -Wl,-e,_start -Wl,--build-id=none -o $@ $^
 
-build/kernel.elf: $(OBJS) arch/riscv64/kernel.ld
-	$(LD) $(LDFLAGS) -o $@ $(OBJS)
+build/user/play.elf: build/user/play.o $(USERLIBS)
+	$(CC) $(USERCFLAGS) -fuse-ld=lld -Wl,-Ttext=0x40000000 \
+	  -Wl,-e,_start -Wl,--build-id=none -o $@ $^
+
+# ---- plain-b kernel (standalone) ----
+$(KERNEL):
+	$(MAKE) -C $(PLAINB)
+
+all: build/vdisk.img
 
 # Terminal-only mode: UART serial is connected to YOUR terminal's stdin/stdout.
 # You can type at qvos$; exit with Ctrl-A x or type 'poweroff'.
-run: build/kernel.elf $(VDISK)
-	$(QEMU) $(QEMU_FLAGS) -nographic -kernel build/kernel.elf
+run: $(KERNEL) $(VDISK)
+	$(QEMU) $(QEMU_FLAGS) -nographic -kernel $(KERNEL)
 
 # Framebuffer window + terminal input in one process:
 #   GTK window shows the framebuffer; keep typing in the terminal that ran make.
-run-gui: build/kernel.elf $(VDISK)
-	$(QEMU) $(QEMU_FLAGS) -display gtk -serial mon:stdio -kernel build/kernel.elf
+run-gui: $(KERNEL) $(VDISK)
+	$(QEMU) $(QEMU_FLAGS) -display gtk -serial mon:stdio -kernel $(KERNEL)
 
 # Headless framebuffer view: connect a VNC viewer to 127.0.0.1:$(VNC_PORT).
 # Type in the terminal that ran make (serial is multiplexed there).
-run-vnc: build/kernel.elf $(VDISK)
+run-vnc: $(KERNEL) $(VDISK)
 	$(QEMU) $(QEMU_FLAGS) -display vnc=127.0.0.1:$(VNC_PORT) \
-	    -serial mon:stdio -kernel build/kernel.elf
+	    -serial mon:stdio -kernel $(KERNEL)
 
 # Non-interactive regression: auto-stop after 15 s, never fails make.
-test: build/kernel.elf $(VDISK)
+test: $(KERNEL) $(VDISK)
 	timeout --foreground 15 $(QEMU) $(QEMU_FLAGS) -nographic \
-	    -kernel build/kernel.elf || true
+	    -kernel $(KERNEL) || true
 
 clean:
 	rm -rf build
 
-.PHONY: all run run-gui run-vnc test clean
+.PHONY: all run run-gui run-vnc test clean rootfs-reset

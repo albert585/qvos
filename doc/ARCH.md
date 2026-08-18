@@ -1,4 +1,7 @@
 # qvos — Architecture Plan
+> Note: the kernel described here now lives in the standalone `plain-b/`
+> project; this qvos tree builds the userspace and rootfs.
+
 ## RV64IMAFCV dual-core S-mode kernel + POSIX-subset userspace (QEMU virt)
 
 ## 1. Hardware model (QEMU riscv64 `virt`, -cpu max)

@@ -24,6 +24,7 @@ enum file_type {
     FD_DEVVDA,     /* /dev/vda: raw virtio-blk disk bytes */
     FD_DEVMOUSE,   /* /dev/mouse: virtio-input event stream */
     FD_DEVKBD,     /* /dev/kbd: virtio-keyboard event stream */
+    FD_DEVPCM,     /* /dev/pcm: virtio-sound raw PCM output */
     FD_DEVNULL,    /* /dev/null: discard writes, EOF reads */
     FD_DEVZERO,    /* /dev/zero: infinite zero bytes */
     FD_DEVDIR,     /* /dev: devfs directory */

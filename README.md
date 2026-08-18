@@ -2,13 +2,15 @@
 > This is an AI project.
 > [中文版 README](./README.zh.md)
 
-A small S-mode kernel + POSIX-subset userspace for a dual-core RV64IMAFCV
-platform, brought up and regression-tested on QEMU `riscv64 virt`.
-
-The kernel image carries **no root filesystem**. `/` is a persistent FAT32
-volume on the virtio-blk disk (`build/vdisk.img`), mounted at boot like a
+qvos is the **userspace / rootfs** half of the project. The S-mode kernel is
+a separate standalone project under [`plain-b/`](./plain-b/README.md); the
+kernel image carries **no root filesystem**, and `/` is a persistent FAT32
+volume on the virtio-blk disk (`build/vdisk.img`) mounted at boot like a
 Linux `root=/dev/vda` system. Kernel and rootfs are built and versioned
 independently.
+
+The kernel feature list below is implemented in `plain-b/`; this tree builds
+the user programs and provisions the rootfs.
 
 ## What is implemented
 - OpenSBI `fw_dynamic` → kernel entry in S-mode (boot hart = whichever hart OpenSBI chooses)
@@ -21,7 +23,7 @@ independently.
 - Processes: fork/exec/wait/exit/yield/sleep, pipe, per-process kernel stacks and `swtch`
 - **Decoupled rootfs**: FAT32 on persistent `build/vdisk.img` (16 MiB,
   mtools-provisioned once), BPB/FAT/cluster-chain/directory parser with
-  read/write/create/truncate; kernel.elf is ~530 KiB and contains no disk image
+  read/write/create/truncate; plain-b.elf is ~530 KiB and contains no disk image
 - VFS-lite: console files, FAT files, pipes, devfs; open/read/write/close/
   lseek/fstat/dup/getdents; mount table with `mount("/dev/vda", target)`
   syscall; per-process `cwd` with `chdir`/`getcwd` and relative-path support
@@ -42,6 +44,9 @@ independently.
 - virtio-input: QEMU `virtio-tablet-device` + `virtio-keyboard-device`, polled
   eventq drivers, `/dev/mouse` and `/dev/kbd` event streams
   (`/bin/mtest` dumps mouse events; `/bin/term` is a framebuffer terminal)
+- virtio-sound: minimal PCM playback through `/dev/pcm` (48 kHz / stereo /
+  S16LE), `/bin/play` writes a short sine wave; QEMU captures to
+  `/tmp/qvos.wav`
 - Directories: `SYS_getdents` + `/bin/ls` list FAT32 directories and the devfs
   `/dev` directory; execve preserves `argc/argv` for spawned programs
 - LVGL v9.4 ported to userspace: full-screen XRGB8888 display driver over the
@@ -57,18 +62,21 @@ independently.
 Requirements: clang (with RISC-V target), ld.lld, llvm-objcopy, qemu-system-riscv64,
 mtools, make, meson, ninja.
 
-    make               # builds kernel.elf + user programs (no rootfs inside the kernel)
-    make run           # creates vdisk.img if missing, then boots with 2 harts
+    make               # build user programs + provision vdisk.img
+    make run           # build plain-b kernel if needed, then boot with 2 harts
     make run-gui       # GTK window shows the framebuffer; type in the terminal
     make run-vnc       # headless; connect a VNC viewer to 127.0.0.1:5900+$(VNC_PORT)
+    make test          # non-interactive regression boot
     make rootfs-reset  # delete vdisk.img; next make run re-provisions a clean rootfs
 
-Kernel and rootfs are decoupled:
+Layout:
 
-- `build/kernel.elf` is a ~530 KiB pure kernel.
-- `build/vdisk.img` is a 16 MiB FAT32 rootfs created once. Later builds never
-  overwrite it, so files you create inside qvos survive rebuilds.
-- At boot the kernel mounts `/dev/vda` on `/`; if the disk is not a usable
+- `plain-b/` is the standalone kernel project; it produces
+  `plain-b/build/plain-b.elf` (~530 KiB, no rootfs inside).
+- This tree builds `build/vdisk.img`, a 16 MiB FAT32 rootfs created once.
+  Later builds never overwrite it, so files you create inside qvos survive
+  rebuilds.
+- At boot `plain-b` mounts `/dev/vda` on `/`; if the disk is not a usable
   FAT32 rootfs it panics with
   `VFS: unable to mount root fs on /dev/vda`.
 
@@ -210,10 +218,9 @@ tail sleep uname`. `cp` and `touch` work because the FAT32 driver now writes
 files and allocates clusters.
 
 ## Source map
-    arch/riscv64/    entry.S, trap.S (uservec/userret trampoline), swtch.S, csr/atomic/trapframe
-    kernel/          pmm, vm, proc/scheduler, trap, syscall, fat32, file, elf, uart/klog,
-                     framebuffer, virtioblk, virtioinput, virtiokbd, rtc, panic
+    plain-b/         standalone kernel: arch/riscv64, include/kernel, kernel/
     user/            crt0.S, crt0-pico.S, libc, picostubs, init.c, ostest.c, sh.c,
-                     fbdemo.c, ls.c, argtest.c, lvdemo.c, mousetest.c, term.c, lv_conf.h
+                     fbdemo.c, ls.c, argtest.c, lvdemo.c, mousetest.c, term.c,
+                     play.c, lv_conf.h
     third_party/     picolibc, lvgl v9.4 sources + lv_conf shim, toybox v0.8.13 subset + pico shim
     doc/             architecture plan + bring-up log

@@ -22,9 +22,6 @@
 #include <kernel/vm.h>
 #include <csr.h>
 
-extern char stage5_blob_start[];
-extern char stage5_blob_end[];
-
 struct proc proc_table[NPROC];
 void *nanosleep_chan;          /* coarse sleep channel, woken by timer_tick */
 static spinlock_t sched_lock;
@@ -447,89 +444,12 @@ int proc_waitpid(int pid, int *status, int options)
     }
 }
 
-/* Stage 5: build one real U-mode process from an embedded, position-linked
- * raw binary.  Stage 6 replaces this hand-loading with the ELF loader. */
+/* Stage 5 test-user creation is not part of the plain-b standalone kernel.
+ * The boot path uses the ELF loader (proc_exec) exclusively. */
 int proc_create_test_user(void)
 {
-    int pid = allocproc();
-    if (pid < 0) {
-        klog_puts("[dbg] create_test: allocproc failed\n");
-        return -1;
-    }
-    struct proc *p = 0;
-    for (int i = 0; i < NPROC; i++) {
-        if (proc_table[i].state == PROC_EMBRYO && proc_table[i].pid == pid) {
-            p = &proc_table[i];
-            break;
-        }
-    }
-    if (!p) {
-        klog_puts("[dbg] create_test: embryo lookup failed\n");
-        return -1;
-    }
-
-    p->pg = vm_create();
-    if (!p->pg) {
-        klog_puts("[dbg] create_test: vm_create failed\n");
-        freeproc(p);
-        return -1;
-    }
-    uvm_map_common(p->pg, p->tf);
-
-    uint64_t entry = 0x40000000UL;
-    uint64_t code_bytes = (uint64_t)stage5_blob_end - (uint64_t)stage5_blob_start;
-    uint64_t code_pages = align_up(code_bytes, PAGE_SIZE) / PAGE_SIZE;
-
-    for (uint64_t i = 0; i < code_pages; i++) {
-        void *mem = pmm_alloc_page();
-        if (!mem || vm_map(p->pg, entry + i * PAGE_SIZE, (uint64_t)mem,
-                           PAGE_SIZE, PTE_U | PTE_R | PTE_W | PTE_X |
-                           PTE_A | PTE_D) != 0) {
-            klog_puts("[dbg] create_test: code map failed\n");
-            freeproc(p);
-            return -1;
-        }
-    }
-    /* Copy the raw binary into the freshly mapped code pages. */
-    for (uint64_t i = 0; i < code_bytes; i++) {
-        uint64_t pa = vm_translate(p->pg, entry + i);
-        if (!pa) {
-            klog_puts("[dbg] create_test: copy translate failed at ");
-            klog_hex(entry + i);
-            klog_puts("\n");
-            freeproc(p);
-            return -1;
-        }
-        ((volatile uint8_t *)pa)[0] =
-            ((volatile uint8_t *)stage5_blob_start)[i];
-    }
-
-    /* 4 user stack pages at USER_STACK_TOP. */
-    uint64_t stack_top = USER_STACK_TOP;
-    for (int i = 0; i < 4; i++) {
-        void *mem = pmm_alloc_page();
-        if (!mem || vm_map(p->pg, stack_top - 4 * PAGE_SIZE + i * PAGE_SIZE,
-                           (uint64_t)mem, PAGE_SIZE,
-                           PTE_U | PTE_R | PTE_W | PTE_A | PTE_D) != 0) {
-            klog_puts("[dbg] create_test: stack map failed\n");
-            freeproc(p);
-            return -1;
-        }
-    }
-
-    p->sz = entry + code_pages * PAGE_SIZE;   /* heap starts after code */
-    p->tf->sepc = entry;
-    p->tf->sstatus = SSTATUS_SPIE | SSTATUS_FS_INITIAL | SSTATUS_VS_INITIAL;
-    p->tf->gpr[2] = stack_top - 8;
-    p->tf->gpr[10] = 0;                      /* argc for Stage 7 */
-    p->tf->satp = SATP_SV39 | ((uint64_t)p->pg >> PAGE_SHIFT);
-
-    uint64_t flags = spin_lock_irqsave(&sched_lock);
-    p->state = PROC_RUNNABLE;
-    rq_push(p);
-    spin_unlock_irqrestore(&sched_lock, flags);
-
-    return pid;
+    (void)0;
+    return -1;
 }
 
 /* Spawn /bin/init (or any FAT32 ELF) as the first user process. */

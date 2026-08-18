@@ -2,12 +2,14 @@
 > 这是一个 AI 项目。
 > [English README](./README.md)
 
-一个运行在双核 RV64IMAFCV 平台上的小型 S-mode 内核 + POSIX 子集用户态，
-在 QEMU `riscv64 virt` 上完成 bring-up 与回归测试。
+qvos 是项目的**用户态 / rootfs 部分**。S-mode 内核在独立的
+[`plain-b/`](./plain-b/README.md) 工程中；内核镜像不携带任何根文件系统，
+`/` 来自 virtio-blk 磁盘（`build/vdisk.img`）上的持久 FAT32 卷，启动时
+挂载，等价于 Linux 的 `root=/dev/vda`。内核与 rootfs 完全解耦，可以独立
+构建、独立演进。
 
-**内核镜像不携带任何根文件系统。** `/` 来自 virtio-blk 磁盘
-（`build/vdisk.img`）上的持久 FAT32 卷，启动时挂载，等价于 Linux 的
-`root=/dev/vda`。内核与 rootfs 完全解耦，可以独立构建、独立演进。
+下面的内核功能列表都在 `plain-b/` 中实现；本目录负责构建用户程序和生成
+rootfs。
 
 ## 已实现功能
 - OpenSBI `fw_dynamic` → S-mode 内核入口（boot hart 由 OpenSBI 决定）
@@ -20,7 +22,7 @@
 - 进程：fork/exec/wait/exit/yield/sleep、pipe、每进程内核栈与 `swtch`
 - **解耦的 rootfs**：`build/vdisk.img`（16 MiB，mtools 首次部署）上的持久
   FAT32，支持 BPB/FAT/簇链/目录解析以及读、写、创建、截断；
-  `kernel.elf` 仅约 530 KiB，不含任何磁盘镜像
+  `plain-b.elf` 仅约 530 KiB，不含任何磁盘镜像
 - VFS-lite：控制台、FAT 文件、管道、devfs；open/read/write/close/lseek/
   fstat/dup/getdents；挂载表 + `mount("/dev/vda", target)` 系统调用；
   每进程 `cwd`，`chdir`/`getcwd`，内核统一解析相对路径
@@ -41,6 +43,8 @@
 - virtio-input：QEMU `virtio-tablet-device` + `virtio-keyboard-device`，
   轮询 eventq 驱动，`/dev/mouse` 与 `/dev/kbd` 事件流
   （`/bin/mtest` 打印鼠标事件；`/bin/term` 是 framebuffer 终端）
+- virtio-sound：通过 `/dev/pcm` 的极简 PCM 播放（48kHz / 双声道 / S16LE），
+  `/bin/play` 写入一段短正弦波；QEMU 会把音频捕获到 `/tmp/qvos.wav`
 - 目录：`SYS_getdents` + `/bin/ls` 可列 FAT32 目录和虚拟 `/dev` 目录；
   execve 保留新程序的 `argc/argv`
 - LVGL v9.4 用户态移植：全屏 XRGB8888 显示驱动、内建堆/字符串 shim、
@@ -55,19 +59,21 @@
 依赖：clang（RISC-V target）、ld.lld、llvm-objcopy、qemu-system-riscv64、
 mtools、make、meson、ninja。
 
-    make               # 构建 kernel.elf + 用户程序（内核不含 rootfs）
-    make run           # vdisk.img 不存在则先创建，然后双核启动
+    make               # 构建用户程序 + 生成 vdisk.img
+    make run           # 需要时先构建 plain-b 内核，然后双核启动
     make run-gui       # GTK 窗口显示 framebuffer；在终端输入
     make run-vnc       # 无头模式；用 VNC 连 127.0.0.1:5900+$(VNC_PORT)
+    make test          # 非交互回归启动
     make rootfs-reset  # 删除 vdisk.img；下次 make run 重建干净 rootfs
 
-内核与 rootfs 解耦：
+目录结构：
 
-- `build/kernel.elf` 是约 530 KiB 的纯内核。
-- `build/vdisk.img` 是只创建一次的 16 MiB FAT32 rootfs。后续构建不会覆盖
-  它，qvos 里创建的文件在重新编译后仍然存在。
-- 启动时内核把 `/dev/vda` 挂到 `/`；如果磁盘不是可用的 FAT32 rootfs，
-  则 panic：`VFS: unable to mount root fs on /dev/vda`。
+- `plain-b/` 是独立内核工程，产物为 `plain-b/build/plain-b.elf`
+  （约 530 KiB，不含 rootfs）。
+- 本目录生成 `build/vdisk.img`，只创建一次的 16 MiB FAT32 rootfs。后续
+  构建不会覆盖它，qvos 里创建的文件在重新编译后仍然存在。
+- 启动时 `plain-b` 把 `/dev/vda` 挂到 `/`；如果磁盘不是可用的 FAT32
+  rootfs，则 panic：`VFS: unable to mount root fs on /dev/vda`。
 
 交互式 shell 测试：
 
@@ -199,14 +205,10 @@ uname`。因为 FAT32 驱动现在支持写文件与分配簇，`cp` 和 `touch`
 工作。
 
 ## 源码地图
-    arch/riscv64/    entry.S、trap.S（uservec/userret trampoline）、swtch.S、
-                     csr/atomic/trapframe
-    kernel/          pmm、vm、proc/调度器、trap、syscall、fat32、file、elf、
-                     uart/klog、framebuffer、virtioblk、virtioinput、virtiokbd、
-                     rtc、panic
+    plain-b/        独立内核：arch/riscv64、include/kernel、kernel/
     user/            crt0.S、crt0-pico.S、libc、picostubs、init.c、ostest.c、
                      sh.c、fbdemo.c、ls.c、argtest.c、lvdemo.c、mousetest.c、
-                     term.c、lv_conf.h
+                     term.c、play.c、lv_conf.h
     third_party/     picolibc、lvgl v9.4 源码 + lv_conf shim、
                      toybox v0.8.13 子集 + pico shim
     doc/             架构规划 + bring-up 日志

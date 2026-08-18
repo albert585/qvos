@@ -12,6 +12,7 @@
 #include <kernel/virtioblk.h>
 #include <kernel/virtioinput.h>
 #include <kernel/virtiokbd.h>
+#include <kernel/virtiosnd.h>
 #include <kernel/vm.h>
 
 __attribute__((noreturn)) void kmain(uint64_t hartid, uint64_t dtb)
@@ -31,6 +32,7 @@ __attribute__((noreturn)) void kmain(uint64_t hartid, uint64_t dtb)
     kbd_init();
     mouse_init();
     rtc_init();
+    snd_init();
     proc_init();
     file_init();
 
@@ -59,7 +61,7 @@ __attribute__((noreturn)) void kmain(uint64_t hartid, uint64_t dtb)
 
     trap_enable_timer(10000);
     smp_start_secondary_harts();
-    klog_puts("[qvos] STAGE10_OK: FAT32 + SMP + framebuffer + virtio-blk + mouse + kbd running\n");
+    klog_puts("[qvos] STAGE10_OK: FAT32 + SMP + framebuffer + virtio-blk + mouse + kbd + sound running\n");
 
     scheduler();   /* never returns */
 }

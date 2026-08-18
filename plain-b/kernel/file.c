@@ -14,6 +14,7 @@
 #include <kernel/virtioblk.h>
 #include <kernel/virtioinput.h>
 #include <kernel/virtiokbd.h>
+#include <kernel/virtiosnd.h>
 
 #define O_RDONLY 0
 #define O_WRONLY 1
@@ -299,6 +300,7 @@ static const struct dev_entry dev_table[] = {
     { "/dev/vda",   FD_DEVVDA },
     { "/dev/mouse", FD_DEVMOUSE },
     { "/dev/kbd",   FD_DEVKBD },
+    { "/dev/pcm",   FD_DEVPCM },
     { "/dev/null",  FD_DEVNULL },
     { "/dev/zero",  FD_DEVZERO },
 };
@@ -311,6 +313,7 @@ static const struct {
     { "vda",  3 },   /* block device */
     { "mouse", 2 },  /* character device */
     { "kbd",   2 },  /* character device */
+    { "pcm",   2 },  /* character device */
     { "null", 2 },
     { "zero", 2 },
 };
@@ -334,6 +337,8 @@ static struct file *dev_open(const char *path, int flags)
     if (type == FD_DEVMOUSE && !mouse_active())
         return 0;
     if (type == FD_DEVKBD && !kbd_active())
+        return 0;
+    if (type == FD_DEVPCM && !snd_active())
         return 0;
 
     struct file *f = file_alloc();
@@ -477,6 +482,8 @@ int file_read(struct file *f, void *dst, size_t n)
                                      n / sizeof(struct qvos_input_event));
         return events * (int)sizeof(struct qvos_input_event);
     }
+    if (f->type == FD_DEVPCM)
+        return -1;   /* PCM is write-only */
     if (f->type == FD_DEVNULL)
         return 0;                           /* always EOF */
     if (f->type == FD_DEVZERO) {
@@ -537,6 +544,8 @@ int file_write(struct file *f, const void *src, size_t n)
             f->offset += (uint32_t)wrote;
         return wrote;
     }
+    if (f->type == FD_DEVPCM)
+        return snd_write(src, n);
     if (f->type == FD_DEVNULL || f->type == FD_DEVZERO) {
         f->offset += (uint32_t)n;
         return (int)n;
