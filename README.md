@@ -1,5 +1,5 @@
 # qvos
-> This is an AI project.
+> This is an AI project and i made it just for fun.if you want to view the formal project ,see plain-01
 > [中文版 README](./README.zh.md)
 
 qvos is the **userspace / rootfs** half of the project. The S-mode kernel is
